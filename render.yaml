@@ -1,0 +1,12 @@
+# Render Blueprint. Fase 1: prototypen som statisk side (fiktive data, ingen kundedata).
+# Produksjonstjenestene (web, worker, Postgres i Frankfurt) legges til her når de er bygget.
+services:
+  - type: web
+    name: agentkontoret-prototype
+    runtime: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    headers:
+      - path: /*
+        name: X-Robots-Tag
+        value: noindex
