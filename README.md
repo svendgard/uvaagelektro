@@ -1,4 +1,4 @@
-# Agentkontoret – Uvaag Elektro (prototype)
+# Uvaag Elektro – Agentkontoret
 
 Første utgave av Tech Haus' agentdashboard for håndverksbedrifter. Fem digitale medarbeidere (AIEmma, AIOliver, AINora, AIHenrik, AISofie) håndterer kundehenvendelser og oppdrag, mens eieren godkjenner alt som går ut.
 
