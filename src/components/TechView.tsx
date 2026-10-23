@@ -2,10 +2,9 @@ import { useState } from 'react';
 import { useStore } from '../state/store';
 import type { Case, ChatMessage } from '../domain/types';
 import { DOC_LABEL } from '../config/tenant';
-import { dayStr } from '../data/jobsSeed';
 import { Icon } from './ui';
 import { JobStageBadge, TechAvatar } from './Projects';
-import { cx, fmtTime } from '../lib/util';
+import { cx, fmtTime, dayStr } from '../lib/util';
 
 /**
  * Montørvisningen slik den vil oppleves i Slack eller Teams: en bot poster dagens jobber,

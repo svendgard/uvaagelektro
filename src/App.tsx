@@ -9,10 +9,14 @@ import { Icon } from './components/ui';
 import { ProjectsView } from './components/Projects';
 import { TechView } from './components/TechView';
 import { cx } from './lib/util';
+import { DEMO } from './demo';
+import { AuthGate } from './components/Auth';
+import { AdminView } from './components/Admin';
+import type { SessionUser } from './lib/api';
 
-type View = 'office' | 'cases' | 'projects' | 'tech' | 'inbox' | 'log' | 'settings';
+type View = 'office' | 'cases' | 'projects' | 'tech' | 'inbox' | 'log' | 'settings' | 'admin';
 
-function Shell() {
+function Shell({ me, logout }: { me?: SessionUser; logout?: () => Promise<void> }) {
   const { state, tenant } = useStore();
   const [view, setView] = useState<View>('office');
   const [caseId, setCaseId] = useState<string | null>(null);
@@ -23,16 +27,19 @@ function Shell() {
   const pending = state.drafts.filter((d) => d.state === 'pending').length;
   const unread = state.cases.filter((c) => c.unreadCustomerReply).length;
   const toControl = state.cases.filter((c) => c.job && (c.job.stage === 'reported' || c.job.help)).length;
-  const tabs: { id: View; label: string; icon: string; badge?: number }[] = [
+  const allTabs: ({ id: View; label: string; icon: string; badge?: number } | false)[] = [
     { id: 'office', label: 'Agentkontoret', icon: 'office', badge: pending },
     { id: 'cases', label: 'Saker', icon: 'cases' },
-    { id: 'projects', label: 'Prosjekter', icon: 'wrench', badge: toControl },
-    { id: 'tech', label: 'Montørvisning', icon: 'chat' },
+    tenant.features.projects && { id: 'projects', label: 'Prosjekter', icon: 'wrench', badge: toControl },
+    tenant.features.projects && { id: 'tech', label: 'Montørvisning', icon: 'chat' },
     { id: 'inbox', label: 'Innboks', icon: 'inbox', badge: unread },
     { id: 'log', label: 'Logg', icon: 'log' },
     { id: 'settings', label: 'Innstillinger', icon: 'settings' },
+    me?.role === 'superadmin' && { id: 'admin', label: 'Admin', icon: 'shield' },
   ];
-  const roleLabel = { owner: tenant.owner.name, staff: 'Ansatt (demo)', viewer: 'Lesetilgang (demo)' }[state.role];
+  const tabs = allTabs.filter((t): t is { id: View; label: string; icon: string; badge?: number } => !!t);
+  const userName = me ? (me.name || me.email) : tenant.owner.name;
+  const roleText = me ? (me.role === 'superadmin' ? 'Superadministrator' : 'Eier') : 'Demo';
 
   return (
     <div className="min-h-full">
@@ -58,11 +65,12 @@ function Shell() {
             ))}
           </nav>
           <div className="ml-auto flex shrink-0 items-center gap-2 lg:ml-0">
-            <button className="btn btn-accent" onClick={() => setSim(true)}><Icon name="mail" /><span className="hidden sm:inline">Simuler henvendelse</span><span className="sm:hidden">Simuler</span></button>
-            <span className="hidden items-center gap-2 2xl:flex">
-              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-brand text-xs font-bold text-surface">{tenant.owner.firstName[0]}</span>
-              <span className="text-xs leading-tight"><b>{roleLabel}</b><br /><span className="text-muted">{state.role === 'owner' ? 'Eier' : 'Begrenset tilgang'}</span></span>
+            {DEMO && <button className="btn btn-accent" onClick={() => setSim(true)}><Icon name="mail" /><span className="hidden sm:inline">Simuler henvendelse</span><span className="sm:hidden">Simuler</span></button>}
+            <span className="hidden items-center gap-2 xl:flex">
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-brand text-xs font-bold text-surface">{userName[0]?.toUpperCase()}</span>
+              <span className="text-xs leading-tight"><b>{userName}</b><br /><span className="text-muted">{roleText}</span></span>
             </span>
+            {logout && <button className="btn btn-ghost !px-2.5" onClick={() => void logout()} title="Logg ut"><Icon name="back" /><span className="hidden sm:inline">Logg ut</span></button>}
           </div>
         </div>
         <nav className="scroll-x flex gap-1 border-t border-line pb-2 pt-1.5 lg:hidden" style={{ paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))', paddingRight: 'max(16px, env(safe-area-inset-right, 0px))' }} aria-label="Hovedmeny mobil">
@@ -74,7 +82,7 @@ function Shell() {
           ))}
         </nav>
         <div className="border-t border-warn/30 bg-warn-soft py-1 text-center text-[11px] font-semibold text-warn" style={{ paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))', paddingRight: 'max(16px, env(safe-area-inset-right, 0px))' }}>
-          Prototype med fiktive data. E-post sendes og mottas kun i simulering.
+          {DEMO ? 'Prototype med fiktive data. E-post sendes og mottas kun i simulering.' : 'E-post er ikke koblet til ennå. Saker vises her når Microsoft 365 er tilkoblet.'}
         </div>
       </header>
 
@@ -86,11 +94,12 @@ function Shell() {
         {view === 'inbox' && <InboxView openCase={setCaseId} />}
         {view === 'log' && <LogView openCase={setCaseId} />}
         {view === 'settings' && <SettingsView />}
+        {view === 'admin' && me?.role === 'superadmin' && <AdminView me={me} />}
       </main>
 
       <CaseDetail caseId={caseId} onClose={() => setCaseId(null)} />
       <AgentDrawer id={agentId} onClose={() => setAgentId(null)} nav={nav} />
-      <SimulateDialog open={sim} onClose={() => setSim(false)} onCreated={(id) => setCaseId(id)} />
+      {DEMO && <SimulateDialog open={sim} onClose={() => setSim(false)} onCreated={(id) => setCaseId(id)} />}
 
       <div className="pointer-events-none fixed bottom-0 right-0 z-50 flex flex-col items-end gap-2 p-4" style={{ paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))', paddingRight: 'max(16px, env(safe-area-inset-right, 0px))' }} aria-live="polite">
         {state.toasts.map((t) => (
@@ -102,5 +111,15 @@ function Shell() {
 }
 
 export default function App() {
-  return <StoreProvider><Shell /></StoreProvider>;
+  if (DEMO) return <StoreProvider><Shell /></StoreProvider>;
+  return (
+    <AuthGate>
+      {(me, logout) => (
+        // Superadministrator kan se alt, men bare eieren kan godkjenne og sende til kunder.
+        <StoreProvider key={me.id} role={me.role === 'owner' ? 'owner' : 'viewer'}>
+          <Shell me={me} logout={logout} />
+        </StoreProvider>
+      )}
+    </AuthGate>
+  );
 }

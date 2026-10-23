@@ -4,6 +4,7 @@ import type { Attachment, CaseStatus, Draft, EmailMessage, Priority } from '../d
 import { PRIORITY_META, STATUS_META, STATUS_ORDER } from '../config/tenant';
 import { Icon, Modal, Portrait } from './ui';
 import { ActorAvatar } from './Dashboard';
+import { DEMO } from '../demo';
 import { JobPanel, JobStageBadge } from './Projects';
 import { cx, fmtDateTime, kr } from '../lib/util';
 
@@ -232,7 +233,7 @@ export function CaseDetail({ caseId, onClose }: { caseId: string | null; onClose
                 {canFollow && <button className="btn btn-primary" onClick={() => actions.requestDraft(c.id, 'follow_up')}><Icon name="sparkle" />Be AINora lage oppfølging</button>}
                 {(c.status === 'new' || c.status === 'ai_processing') && <button className="btn btn-primary" onClick={() => actions.requestDraft(c.id)}><Icon name="sparkle" />Be AIOliver lage svarutkast</button>}
                 <button className="btn btn-ghost" onClick={() => setCompose(true)}><Icon name="pen" />Skriv selv</button>
-                {waitingCustomer && <button className="btn btn-ghost" onClick={() => actions.simulateCustomerReply(c.id)}><Icon name="mail" />Simuler kundesvar (demo)</button>}
+                {DEMO && waitingCustomer && <button className="btn btn-ghost" onClick={() => actions.simulateCustomerReply(c.id)}><Icon name="mail" />Simuler kundesvar (demo)</button>}
               </div>
             )}
             {draft && !compose && <button className="self-start text-xs font-semibold text-brand hover:underline" onClick={() => setCompose(true)}>Skriv og send en melding manuelt i stedet</button>}

@@ -1,3 +1,4 @@
+(globalThis as any).__DEMO__ = true;
 import { JSDOM } from 'jsdom';
 const dom = new JSDOM('<!doctype html><div id="root"></div>', { pretendToBeVisual: true, url: 'http://localhost/' });
 const g: any = globalThis;

@@ -23,3 +23,9 @@ export const kr = (n: number) => `kr ${n.toLocaleString('nb-NO')}`;
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
+
+/** Dato som YYYY-MM-DD i lokal tid, forskjøvet med antall dager. */
+export const dayStr = (offsetDays = 0) => {
+  const d = new Date(Date.now() + offsetDays * 864e5);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};

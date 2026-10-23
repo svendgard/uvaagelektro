@@ -1,3 +1,4 @@
+import { DEMO } from '../demo';
 import type { AgentConfig, AutomationLevel, CaseStatus, DocKey, JobStage, JobType, Priority, Technician } from '../domain/types';
 
 /**
@@ -42,20 +43,22 @@ export interface TenantConfig {
     hoursTolerance: number;
   };
   accounting: { provider: 'simulated' | 'tripletex'; company: string };
+  /** Hvilke deler av løsningen som er i bruk. Fase 1: e-post og tilbud. */
+  features: { projects: boolean };
   /** Agent-ID-er i Tech Haus' Agent Dashboard. Må være registrert på kilden AGENT_DASHBOARD_SOURCE. */
   monitoring: { mailSyncAgentId: string };
   /** Dokumentasjon som kreves per oppdragstype før kontroll. */
   docRequirements: Record<JobType, DocKey[]>;
 }
 
-export const uvaagElektro: TenantConfig = {
+const uvaagElektroBase: TenantConfig = {
   id: 'uvaag-elektro',
   company: {
     name: 'Uvaag Elektro AS',
     shortName: 'Uvaag Elektro',
-    orgNr: '000 000 000 (demo)',
+    orgNr: '',
     email: 'espen@uvaagelektro.no',
-    phone: '000 00 000 (demo)',
+    phone: '',
     city: 'Kristiansand',
     monogram: 'UE',
   },
@@ -150,11 +153,7 @@ export const uvaagElektro: TenantConfig = {
     mailbox: 'espen@uvaagelektro.no',
     ignoreRules: [{ fromContains: 'nyhetsbrev' }, { fromContains: 'noreply' }, { subjectContains: 'Ukens tilbud' }],
   },
-  priceTemplates: [
-    { id: 'pt-1', jobType: 'elbillader', label: 'Montering av elbillader, standard (inntil 15 m kabel)', amount: 14900, unit: 'fastpris inkl. mva', note: 'Eksempelmal – erstattes av Uvaag Elektros egne priser' },
-    { id: 'pt-2', jobType: 'stikkontakter', label: 'Ny dobbel stikkontakt, åpent anlegg', amount: 1450, unit: 'per stk inkl. mva', note: 'Eksempelmal – erstattes av Uvaag Elektros egne priser' },
-    { id: 'pt-3', jobType: 'feilsoking', label: 'Feilsøking, oppmøte inkl. første time', amount: 1690, unit: 'oppmøte inkl. mva', note: 'Eksempelmal – erstattes av Uvaag Elektros egne priser' },
-  ],
+  priceTemplates: [],
   rules: {
     responseTargetHours: 24,
     followUpAfterDays: 7,
@@ -164,36 +163,10 @@ export const uvaagElektro: TenantConfig = {
   signature: 'Med vennlig hilsen\nEspen Uvaag\nUvaag Elektro AS',
   technicians: [
     { id: 'espen', name: 'Espen Uvaag', firstName: 'Espen', initials: 'EU', color: 'brand', isOwner: true },
-    { id: 'marius', name: 'Marius Holm', firstName: 'Marius', initials: 'MH', color: 'info' },
-    { id: 'sindre', name: 'Sindre Eik', firstName: 'Sindre', initials: 'SE', color: 'ok' },
-    { id: 'tobias', name: 'Tobias Lind', firstName: 'Tobias', initials: 'TL', color: 'violet' },
   ],
-  billing: {
-    hourlyRate: 950,
-    vatRate: 0.25,
-    hoursTolerance: 0.5,
-    materials: {
-      '10 001 01': { name: 'Elbillader 22 kW, Type 2 (eksempel)', unit: 'stk', price: 8900 },
-      '10 001 02': { name: 'Installasjonskabel PFXP 3G6 (eksempel)', unit: 'm', price: 89 },
-      '10 001 03': { name: 'Jordfeilbryter type B 40A (eksempel)', unit: 'stk', price: 2450 },
-      '10 001 04': { name: 'Automatsikring C16 (eksempel)', unit: 'stk', price: 210 },
-      '10 001 05': { name: 'Sikringsskap 36 moduler (eksempel)', unit: 'stk', price: 3900 },
-      '10 001 06': { name: 'Jordfeilautomat 16A 30mA (eksempel)', unit: 'stk', price: 690 },
-      '10 001 07': { name: 'Overspenningsvern type 2 (eksempel)', unit: 'stk', price: 1890 },
-      '10 001 08': { name: 'Dobbel stikkontakt, hvit (eksempel)', unit: 'stk', price: 145 },
-      '10 001 09': { name: 'Stikkontakt med USB-C (eksempel)', unit: 'stk', price: 520 },
-      '10 001 10': { name: 'Koblingsboks IP55 (eksempel)', unit: 'stk', price: 95 },
-      '10 001 11': { name: 'Downlight LED 7W dimbar (eksempel)', unit: 'stk', price: 340 },
-      '10 001 12': { name: 'Dimmer LED 250W (eksempel)', unit: 'stk', price: 780 },
-      '10 001 13': { name: 'Kabelkanal 40x12, hvit (eksempel)', unit: 'm', price: 42 },
-    },
-    fixedPackages: [
-      { id: 'fp-1', label: 'Bytte inntil 3 stikkontakter (fastpris)', amount: 1890, includesHours: 1 },
-      { id: 'fp-2', label: 'Montere lampe/takarmatur (fastpris)', amount: 1290, includesHours: 0.75 },
-      { id: 'fp-3', label: 'Bytte til USB-kontakter, inntil 3 stk (fastpris)', amount: 2390, includesHours: 1 },
-    ],
-  },
+  billing: { hourlyRate: 0, vatRate: 0.25, hoursTolerance: 0.5, materials: {}, fixedPackages: [] },
   accounting: { provider: 'simulated', company: 'Uvaag Elektro AS' },
+  features: { projects: false },
   monitoring: { mailSyncAgentId: 'agentkontoret-uvaag-epost' },
   docRequirements: {
     elbillader: ['samsvarserklaering', 'risikovurdering', 'nettselskap'],
@@ -206,6 +179,60 @@ export const uvaagElektro: TenantConfig = {
     naering: ['samsvarserklaering', 'risikovurdering'],
   },
 };
+
+/** Fase 1 (e-post og tilbud) har ikke AISofie. Hun er med i demoen. */
+const PHASE1_AGENTS = uvaagElektroBase.agents.filter((a) => a.id !== 'control');
+
+/**
+ * Eksempeldata for demoen: fiktive montører, eksempelpriser og eksempelmateriell.
+ * Refereres bare når DEMO er på, så den fjernes fra produksjonsbygget.
+ */
+function demoOverrides(): Partial<TenantConfig> {
+  return {
+    company: { ...uvaagElektroBase.company, orgNr: '000 000 000 (demo)', phone: '000 00 000 (demo)' },
+    features: { projects: true },
+    priceTemplates: [
+      { id: 'pt-1', jobType: 'elbillader', label: 'Montering av elbillader, standard (inntil 15 m kabel)', amount: 14900, unit: 'fastpris inkl. mva', note: 'Eksempelmal – erstattes av Uvaag Elektros egne priser' },
+      { id: 'pt-2', jobType: 'stikkontakter', label: 'Ny dobbel stikkontakt, åpent anlegg', amount: 1450, unit: 'per stk inkl. mva', note: 'Eksempelmal – erstattes av Uvaag Elektros egne priser' },
+      { id: 'pt-3', jobType: 'feilsoking', label: 'Feilsøking, oppmøte inkl. første time', amount: 1690, unit: 'oppmøte inkl. mva', note: 'Eksempelmal – erstattes av Uvaag Elektros egne priser' },
+    ],
+    technicians: [
+      { id: 'espen', name: 'Espen Uvaag', firstName: 'Espen', initials: 'EU', color: 'brand', isOwner: true },
+      { id: 'marius', name: 'Marius Holm', firstName: 'Marius', initials: 'MH', color: 'info' },
+      { id: 'sindre', name: 'Sindre Eik', firstName: 'Sindre', initials: 'SE', color: 'ok' },
+      { id: 'tobias', name: 'Tobias Lind', firstName: 'Tobias', initials: 'TL', color: 'violet' },
+    ],
+    billing: {
+      hourlyRate: 950,
+      vatRate: 0.25,
+      hoursTolerance: 0.5,
+      materials: {
+        '10 001 01': { name: 'Elbillader 22 kW, Type 2 (eksempel)', unit: 'stk', price: 8900 },
+        '10 001 02': { name: 'Installasjonskabel PFXP 3G6 (eksempel)', unit: 'm', price: 89 },
+        '10 001 03': { name: 'Jordfeilbryter type B 40A (eksempel)', unit: 'stk', price: 2450 },
+        '10 001 04': { name: 'Automatsikring C16 (eksempel)', unit: 'stk', price: 210 },
+        '10 001 05': { name: 'Sikringsskap 36 moduler (eksempel)', unit: 'stk', price: 3900 },
+        '10 001 06': { name: 'Jordfeilautomat 16A 30mA (eksempel)', unit: 'stk', price: 690 },
+        '10 001 07': { name: 'Overspenningsvern type 2 (eksempel)', unit: 'stk', price: 1890 },
+        '10 001 08': { name: 'Dobbel stikkontakt, hvit (eksempel)', unit: 'stk', price: 145 },
+        '10 001 09': { name: 'Stikkontakt med USB-C (eksempel)', unit: 'stk', price: 520 },
+        '10 001 10': { name: 'Koblingsboks IP55 (eksempel)', unit: 'stk', price: 95 },
+        '10 001 11': { name: 'Downlight LED 7W dimbar (eksempel)', unit: 'stk', price: 340 },
+        '10 001 12': { name: 'Dimmer LED 250W (eksempel)', unit: 'stk', price: 780 },
+        '10 001 13': { name: 'Kabelkanal 40x12, hvit (eksempel)', unit: 'm', price: 42 },
+      },
+      fixedPackages: [
+        { id: 'fp-1', label: 'Bytte inntil 3 stikkontakter (fastpris)', amount: 1890, includesHours: 1 },
+        { id: 'fp-2', label: 'Montere lampe/takarmatur (fastpris)', amount: 1290, includesHours: 0.75 },
+        { id: 'fp-3', label: 'Bytte til USB-kontakter, inntil 3 stk (fastpris)', amount: 2390, includesHours: 1 },
+      ],
+    },
+  };
+}
+
+export const uvaagElektro: TenantConfig = DEMO
+  ? { ...uvaagElektroBase, ...demoOverrides() }
+  : { ...uvaagElektroBase, agents: PHASE1_AGENTS };
 
 export const DOC_LABEL: Record<DocKey, string> = {
   samsvarserklaering: 'Samsvarserklæring',

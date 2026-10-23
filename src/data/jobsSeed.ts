@@ -9,10 +9,8 @@ const ago = (h: number) => new Date(now - h * 3600e3).toISOString();
 let seq = 0;
 const uid = (p: string) => `${p}-j${++seq}`;
 
-export const dayStr = (offsetDays = 0) => {
-  const d = new Date(now + offsetDays * 864e5);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-};
+import { dayStr } from '../lib/util';
+export { dayStr };
 /** I dag kl. hh:mm som ISO. */
 const todayAt = (hh: number, mm = 0) => { const d = new Date(now); d.setHours(hh, mm, 0, 0); return d.getTime() > now ? ago(0.2) : d.toISOString(); };
 

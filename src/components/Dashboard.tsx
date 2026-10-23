@@ -186,14 +186,14 @@ export function Dashboard({ nav, onFilter }: { nav: Nav; onFilter: (f: string) =
           <section>
             <div className="mb-2 flex items-baseline justify-between">
               <h2 className="font-display text-base font-semibold">Agentkontoret</h2>
-              <span className="text-xs text-muted">Fem digitale medarbeidere · klikk for detaljer</span>
+              <span className="text-xs text-muted">{['Ingen', 'Én', 'To', 'Tre', 'Fire', 'Fem'][agents.length] ?? agents.length} digitale medarbeidere · klikk for detaljer</span>
             </div>
             <div className="grid gap-3 sm:grid-cols-2 sm:[&>*:last-child:nth-child(odd)]:col-span-2">
               {agents.map((a) => <AgentCard key={a.id} view={a} onOpen={() => nav.openAgent(a.id)} />)}
             </div>
           </section>
           <ApprovalQueue nav={nav} />
-          <ControlQueue openCase={nav.openCase} />
+          {tenant.features.projects && <ControlQueue openCase={nav.openCase} />}
         </div>
         <aside className="card flex max-h-[44rem] min-w-0 flex-col p-4 lg:sticky lg:top-20">
           <div className="mb-1 flex items-center justify-between">

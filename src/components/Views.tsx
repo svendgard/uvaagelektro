@@ -5,7 +5,9 @@ import type { UserRole } from '../domain/types';
 import { ActivityFeed } from './Dashboard';
 import { CaseStatusBadge, Icon, Modal, Portrait } from './ui';
 import { cx, fmtDateTime, fmtRelative, kr } from '../lib/util';
-import { SIMULATION_TEMPLATES } from '../data/seed';
+import * as demoData from '../data/demoState';
+import { DEMO } from '../demo';
+const SIMULATION_TEMPLATES = DEMO ? demoData.SIMULATION_TEMPLATES : [];
 
 export function InboxView({ openCase }: { openCase: (id: string) => void }) {
   const { state, tenant } = useStore();
@@ -20,7 +22,7 @@ export function InboxView({ openCase }: { openCase: (id: string) => void }) {
           <h1 className="font-display text-2xl font-semibold">Innboks</h1>
           <p className="text-[13px] text-muted">Speiler {tenant.mail.mailbox}. Den vanlige e-postkontoen fungerer som før.</p>
         </div>
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-warn/40 bg-warn-soft px-3 py-1 text-xs font-semibold text-warn"><Icon name="plug" className="h-3.5 w-3.5" />Simulert innboks · ingen ekte e-postkonto tilkoblet</span>
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-warn/40 bg-warn-soft px-3 py-1 text-xs font-semibold text-warn"><Icon name="plug" className="h-3.5 w-3.5" />{DEMO ? 'Simulert innboks · ingen ekte e-postkonto tilkoblet' : 'Ikke koblet til ennå'}</span>
       </div>
       <div className="flex gap-1.5">
         <button onClick={() => setTab('cases')} className={cx('rounded-full border px-3 py-1 text-xs font-semibold', tab === 'cases' ? 'border-brand bg-brand text-surface' : 'border-line bg-surface text-muted')}>Kundehenvendelser <span className="tnum opacity-70">{inbound.filter((m) => caseByThread.has(m.threadId)).length}</span></button>
@@ -137,7 +139,7 @@ export function SettingsView() {
         <p className="mb-3 text-[13px] text-muted">Koblingen skjer med OAuth. Espen logger inn hos Microsoft eller Google og godkjenner tilgang. Dashboardet ser aldri passordet.</p>
         <div className="mb-3 flex items-center gap-3 rounded-xl border border-warn/40 bg-warn-soft px-4 py-3 text-[13px]">
           <Icon name="plug" className="h-5 w-5 text-warn" />
-          <span><b>Status: simulert.</b> Ingen ekte e-post sendes eller mottas i denne prototypen. Konto som speiles: {tenant.mail.mailbox}.</span>
+          <span>{DEMO ? <><b>Status: simulert.</b> Ingen ekte e-post sendes eller mottas i denne prototypen.</> : <><b>Status: ikke koblet til.</b> Tilkoblingen kommer i neste versjon.</>} Konto som speiles: {tenant.mail.mailbox}.</span>
         </div>
         <div className="flex flex-wrap gap-2">
           <button className="btn btn-ghost" disabled title="Krever app-registrering i Espens Microsoft 365"><Icon name="lock" />Koble til Microsoft 365</button>
@@ -145,7 +147,7 @@ export function SettingsView() {
         </div>
       </section>
 
-      <section className="card p-5">
+      {DEMO && <section className="card p-5">
         <h2 className="mb-1 font-display text-base font-semibold">Roller og tilgang</h2>
         <p className="mb-3 text-[13px] text-muted">Bytt rolle for å se hvordan tilgangsstyringen virker i demoen.</p>
         <div className="grid gap-2 sm:grid-cols-3">
@@ -155,11 +157,12 @@ export function SettingsView() {
             </button>
           ))}
         </div>
-      </section>
+      </section>}
 
       <section className="card p-5">
         <h2 className="mb-1 font-display text-base font-semibold">Prismaler</h2>
-        <p className="mb-3 text-[13px] text-muted">AIOliver bruker bare priser herfra. Finnes ingen mal, må Espen sette pris selv. Tallene under er eksempler.</p>
+        <p className="mb-3 text-[13px] text-muted">AIOliver bruker bare priser herfra. Finnes ingen mal, må Espen sette pris selv.{DEMO && ' Tallene under er eksempler.'}</p>
+        {tenant.priceTemplates.length === 0 && <p className="rounded-lg bg-sunk px-3 py-2 text-[13px] text-muted">Ingen prismaler lagt inn ennå. Til da lager AIOliver bare svar uten priser.</p>}
         <ul className="divide-y divide-line text-[13px]">
           {tenant.priceTemplates.map((p) => (
             <li key={p.id} className="flex flex-wrap items-baseline justify-between gap-2 py-2"><span>{p.label}<span className="block text-xs text-faint">{p.note}</span></span><b className="tnum">{kr(p.amount)} <span className="font-normal text-muted">{p.unit}</span></b></li>
@@ -167,7 +170,7 @@ export function SettingsView() {
         </ul>
       </section>
 
-      <section className="card p-5">
+      {tenant.features.projects && <section className="card p-5">
         <h2 className="mb-1 font-display text-base font-semibold">Prosjektkontroll og fakturagrunnlag</h2>
         <p className="mb-3 text-[13px] text-muted">AISofie bruker disse tallene når hun lager fakturagrunnlag. Alle tall er eksempler, og erstattes av Uvaag Elektros egne.</p>
         <div className="grid gap-4 md:grid-cols-2">
@@ -186,7 +189,7 @@ export function SettingsView() {
           </div>
         </div>
         <p className="mt-3 text-xs text-muted">Tripletex: simulert. Ved kobling opprettes ett prosjekt per oppdrag, timer leses tilbake, og godkjent fakturagrunnlag blir en ordre i Tripletex.</p>
-      </section>
+      </section>}
 
       <section className="card p-5">
         <h2 className="mb-1 font-display text-base font-semibold">Sikkerhetsregler</h2>
@@ -204,13 +207,13 @@ export function SettingsView() {
         </ul>
       </section>
 
-      <section className="card p-5">
+      {DEMO && <section className="card p-5">
         <h2 className="mb-1 font-display text-base font-semibold">Demoverktøy</h2>
         <div className="flex flex-wrap gap-2">
           <button className="btn btn-ghost" onClick={actions.failNextSend}><Icon name="alert" />La neste sending feile</button>
           <button className="btn btn-ghost" onClick={actions.reset}><Icon name="refresh" />Tilbakestill demodata</button>
         </div>
-      </section>
+      </section>}
     </div>
   );
 }

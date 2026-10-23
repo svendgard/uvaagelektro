@@ -3,9 +3,8 @@ import { useStore } from '../state/store';
 import type { Case, ChatMessage, ControlCheck, Job, JobStage, Technician } from '../domain/types';
 import { DOC_LABEL, JOB_STAGE_META, JOB_STAGE_ORDER } from '../config/tenant';
 import { invoiceTotal } from '../adapters/ai/ProjectControl';
-import { dayStr } from '../data/jobsSeed';
 import { Empty, Icon, Portrait } from './ui';
-import { cx, fmtDateTime, fmtRelative, fmtTime, kr } from '../lib/util';
+import { cx, fmtDateTime, fmtRelative, fmtTime, kr, dayStr } from '../lib/util';
 
 const TECH_TONE: Record<string, string> = {
   brand: 'bg-brand text-surface', info: 'bg-info text-surface', ok: 'bg-ok text-surface', violet: 'bg-violet text-surface',

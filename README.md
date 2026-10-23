@@ -4,9 +4,12 @@ Første utgave av Tech Haus' agentdashboard for håndverksbedrifter. Fem digital
 
 ```
 npm install
-npm run dev        # utviklingsserver
-npm run build      # én selvstendig HTML-fil i dist/
+npm run build        # produksjonsbygg uten eksempeldata (serveres av server/index.ts)
+npm run build:demo   # prototype med fiktive data som én HTML-fil (DEMO=true)
+npm start            # server: innlogging + frontend (krever DATABASE_URL)
 npm run typecheck
+npm test             # alle tester
+npx tsx tests/auth.mts       # innlogging, roller, sperrer, invitasjoner
 npx tsx tests/smoke.mts      # røyktest: e-post og godkjenning
 npx tsx tests/projects.mts   # røyktest: oppdrag og prosjektkontroll
 npx tsx tests/health.mts     # helserapportering mot Agent Dashboard
@@ -84,3 +87,17 @@ Miljøvariabler (Render, bakgrunnsarbeideren):
 | `MONITORING_ENABLED` | `true` | `false` slår av all rapportering |
 
 Låsen mot overlapp er i minnet. Kjør bakgrunnsarbeideren som én instans, eller bytt til Postgres advisory lock ved flere instanser.
+
+## Innlogging og tilgang
+
+Produksjonsversjonen (`server/`) krever innlogging. Ingen data vises uten gyldig sesjon.
+
+- Roller: **eier** (Espen) bruker Agentkontoret. **Superadministrator** (Tech Haus) ser alt og har Admin-fanen, men kan ikke sende e-post til kunder.
+- Brukere opprettes av superadministrator med en engangslenke (gyldig 72 t). Personen velger passord selv (minst 12 tegn, scrypt).
+- Første superadministrator opprettes ved oppstart fra `BOOTSTRAP_SUPERADMIN_EMAIL`. Engangslenken skrives til loggen i Render.
+- Sesjon i httpOnly/Secure/SameSite=Strict-cookie. Utløper etter 7 dager, eller 24 t uten aktivitet.
+- 5 feil innlogginger per e-post (30 per IP) på 15 minutter gir midlertidig sperre.
+- CSRF-vern, CSP, HSTS og `noindex` på alle svar. Revisjonslogg og innloggingslogg i Admin.
+- Superadministrator fjernes ved å deaktivere brukeren i Admin.
+
+Miljøvariabler for webtjenesten: `DATABASE_URL`, `NODE_ENV=production`, `TENANT_ID`, `BOOTSTRAP_SUPERADMIN_EMAIL`, valgfritt `APP_URL` (ellers `RENDER_EXTERNAL_URL`).

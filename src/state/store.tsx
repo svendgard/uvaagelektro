@@ -1,10 +1,9 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { Activity, ActivityActor, AgentId, AgentStatus, AuditAction, AuditEntry, Case, CaseStatus, ChatMessage, Draft, DraftKind, EmailMessage, Priority, UserRole } from '../domain/types';
-import { buildJobSeed } from '../data/jobsSeed';
-import { accounting } from '../adapters/accounting/SimulatedTripletex';
 import { createJobActions } from './jobs';
 import { uvaagElektro, type TenantConfig } from '../config/tenant';
-import { buildSeed, SIMULATION_TEMPLATES } from '../data/seed';
+import * as demoData from '../data/demoState';
+import { DEMO } from '../demo';
 import { mailProvider } from '../adapters/mail/SimulatedMailProvider';
 import { agentEngine, missingFor } from '../adapters/ai/SimulatedAgentEngine';
 import { id, sleep } from '../lib/util';
@@ -32,32 +31,21 @@ export interface AppState {
   techChat: Record<string, ChatMessage[]>;
 }
 
-function initial(): AppState {
-  const s = buildSeed();
-  const js = buildJobSeed();
-  accounting.hours = new Map(Object.entries(js.tripletexHours));
-  const existing = new Set(s.cases.map((c) => c.id));
-  const cases = s.cases.map((c) => {
-    const j = js.cases.find((x) => x.id === c.id);
-    return j ? { ...c, job: j.job, assignedAgent: 'control' as const, summary: c.summary } : c;
-  });
-  const added = js.cases.filter((c) => !existing.has(c.id));
-  const addedThreads = new Set(added.map((c) => c.threadId));
+function initial(role: UserRole = 'owner'): AppState {
+  const base = { busy: {}, sending: {}, toasts: [], role };
+  if (DEMO) return { ...demoData.buildDemoState(), ...base, completed: { intake: 6, quote: 4, followup: 3, coordinator: 9, control: 5 } };
   return {
-    ...s,
-    cases: [...cases, ...added],
-    messages: [...s.messages, ...js.messages.filter((m) => addedThreads.has(m.threadId))],
-    activities: [...s.activities, ...js.activities],
-    audit: [...s.audit, ...js.audit],
-    techChat: js.techChat,
-    busy: {}, completed: { intake: 6, quote: 4, followup: 3, coordinator: 9, control: 5 }, sending: {}, toasts: [], role: 'owner',
+    ...base, cases: [], messages: [], drafts: [], activities: [], audit: [], ignored: [], techChat: {},
+    completed: { intake: 0, quote: 0, followup: 0, coordinator: 0, control: 0 },
   };
 }
 
+const SIMULATION_TEMPLATES = DEMO ? demoData.SIMULATION_TEMPLATES : [];
+
 export interface AgentView { id: AgentId; status: AgentStatus; text: string; caseId?: string }
 
-export function useStoreValue(tenant: TenantConfig) {
-  const [state, setState] = useState<AppState>(initial);
+export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
+  const [state, setState] = useState<AppState>(() => initial(role));
   const ref = useRef(state);
     const update = useCallback((fn: (s: AppState) => AppState) => { const next = fn(ref.current); ref.current = next; setState(next); }, []);
   const owner = tenant.owner;
@@ -230,6 +218,7 @@ export function useStoreValue(tenant: TenantConfig) {
 
   /** Hele flyten fra ny e-post til utkast hos Espen. */
   const simulateInbound = useCallback(async (tplIndex: number) => {
+    if (!SIMULATION_TEMPLATES.length) return undefined;
     const tpl = SIMULATION_TEMPLATES[tplIndex % SIMULATION_TEMPLATES.length];
     const threadId = id('t');
     const msg: EmailMessage = {
@@ -333,7 +322,7 @@ export function useStoreValue(tenant: TenantConfig) {
 
   const setRole = (role: UserRole) => update((s) => ({ ...s, role }));
   const failNextSend = () => { mailProvider.failNextSend = true; toast('Neste sending vil feile (for å vise feilhåndtering).', 'neutral'); };
-  const reset = () => update(() => initial());
+  const reset = () => update((s) => initial(s.role));
 
   const jobs = createJobActions({ tenant, ref, update, log, audit, toast, setBusy, produceDraft });
   jobsRef.current = jobs;
@@ -341,7 +330,7 @@ export function useStoreValue(tenant: TenantConfig) {
   // Litt liv ved oppstart: agentene fullfører påbegynte saker mens Espen ser på.
   const booted = useRef(false);
   useEffect(() => {
-    if (booted.current) return;
+    if (booted.current || !DEMO) return;
     booted.current = true;
     (async () => {
       setBusy('intake', { status: 'working', text: 'AIEmma behandler en henvendelse fra Sørlandsbakeriet Demo AS (næringskunde).', caseId: 'c-148' });
@@ -415,8 +404,8 @@ export function useStoreValue(tenant: TenantConfig) {
 
 export type Store = ReturnType<typeof useStoreValue>;
 const Ctx = createContext<Store | null>(null);
-export function StoreProvider({ children, tenant = uvaagElektro }: { children: React.ReactNode; tenant?: TenantConfig }) {
-  const v = useStoreValue(tenant);
+export function StoreProvider({ children, tenant = uvaagElektro, role = 'owner' }: { children: React.ReactNode; tenant?: TenantConfig; role?: UserRole }) {
+  const v = useStoreValue(tenant, role);
   return <Ctx.Provider value={v}>{children}</Ctx.Provider>;
 }
 export const useStore = () => useContext(Ctx)!;
