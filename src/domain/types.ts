@@ -184,7 +184,7 @@ export type AuditAction =
 export interface AuditEntry {
   id: string;
   at: string;
-  actor: string; // 'espen@uvaag-elektro.no' | 'agent:intake' | 'system'
+  actor: string; // 'espen@uvaagelektro.no' | 'agent:intake' | 'system'
   role: 'owner' | 'agent' | 'system';
   action: AuditAction;
   caseId?: string;

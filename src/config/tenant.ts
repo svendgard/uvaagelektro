@@ -54,12 +54,12 @@ export const uvaagElektro: TenantConfig = {
     name: 'Uvaag Elektro AS',
     shortName: 'Uvaag Elektro',
     orgNr: '000 000 000 (demo)',
-    email: 'post@uvaag-elektro.no',
+    email: 'espen@uvaagelektro.no',
     phone: '000 00 000 (demo)',
     city: 'Kristiansand',
     monogram: 'UE',
   },
-  owner: { name: 'Espen Uvaag', firstName: 'Espen', email: 'espen@uvaag-elektro.no', role: 'owner' },
+  owner: { name: 'Espen Uvaag', firstName: 'Espen', email: 'espen@uvaagelektro.no', role: 'owner' },
   agents: [
     {
       id: 'intake',
@@ -146,7 +146,8 @@ export const uvaagElektro: TenantConfig = {
   automation: { level: 1 },
   mail: {
     provider: 'simulated',
-    mailbox: 'post@uvaag-elektro.no',
+    /** Espens egen postkasse. Inneholder også ikke-kundepost, så AIEmma lagrer kun innhold fra kundehenvendelser. */
+    mailbox: 'espen@uvaagelektro.no',
     ignoreRules: [{ fromContains: 'nyhetsbrev' }, { fromContains: 'noreply' }, { subjectContains: 'Ukens tilbud' }],
   },
   priceTemplates: [
