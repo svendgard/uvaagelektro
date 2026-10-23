@@ -59,43 +59,84 @@ function CopyButton({ text, label = 'Kopier tekst' }: { text: string; label?: st
   return <button className="btn btn-accent" onClick={async () => { try { await navigator.clipboard.writeText(text); setDone(true); setTimeout(() => setDone(false), 2000); } catch { /* utilgjengelig */ } }}><Icon name={done ? 'check' : 'file'} />{done ? 'Kopiert' : label}</button>;
 }
 
+const LANG_BUTTONS = [['no', 'Norsk'], ['en', 'Engelsk'], ['sv', 'Svensk'], ['da', 'Dansk']] as const;
+
+/** Ulagrede endringer i skjemaet tas vare på i nettleseren, så de overlever at siden oppdateres. */
+function useDraftForm(d: Draft) {
+  const key = `ak-utkast:${d.id}:${d.state === 'pending' ? 'forslag' : 'send'}`;
+  const saved = { subject: d.subject, body: d.body, email: d.recipient ?? '', language: d.language ?? 'no' };
+  const read = () => { try { const v = sessionStorage.getItem(key); return v ? { ...saved, ...JSON.parse(v) } : saved; } catch { return saved; } };
+  const [form, setForm] = useState(read);
+  useEffect(() => { setForm(read()); }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (patch: Partial<typeof saved>) => setForm((f: typeof saved) => {
+    const next = { ...f, ...patch };
+    try { sessionStorage.setItem(key, JSON.stringify(next)); } catch { /* utilgjengelig */ }
+    return next;
+  });
+  const reset = () => { try { sessionStorage.removeItem(key); } catch { /* */ } setForm(saved); };
+  const dirty = form.subject !== saved.subject || form.body !== saved.body || form.email !== saved.email;
+  return { form, set, reset, dirty, clear: () => { try { sessionStorage.removeItem(key); } catch { /* */ } } };
+}
+
 function ApprovalPanel({ d }: { d: Draft }) {
   const { tenant, state, actions } = useStore();
   const ag = tenant.agents.find((a) => a.id === d.author);
-  const [subject, setSubject] = useState(d.subject);
-  const [body, setBody] = useState(d.body);
-  const [mode, setMode] = useState<'view' | 'reject' | 'regen'>('view');
+  const { form, set, reset, dirty, clear } = useDraftForm(d);
+  const [mode, setMode] = useState<'view' | 'reject' | 'regen' | 'confirm'>('view');
   const [note, setNote] = useState('');
-  useEffect(() => { setSubject(d.subject); setBody(d.body); setMode('view'); setNote(''); }, [d.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  const sending = !!state.sending[d.id];
-  const edited = subject !== d.subject || body !== d.body;
-  const canSend = state.role === 'owner';
+  const [busy, setBusy] = useState<null | 'approve' | 'save' | 'send' | 'translate' | 'rewrite'>(null);
+  useEffect(() => { setMode('view'); setNote(''); }, [d.id, d.state]);
+  const sending = !!state.sending[d.id] || d.state === 'sending';
+  const canAct = state.role === 'owner';
   const shadow = useShadowMode();
   const kase = state.cases.find((c) => c.id === d.caseId)!;
+  const inQueue = d.state === 'approved' || d.state === 'sending';
+  const to = form.email || kase.customer.email;
   const kindLabel = { reply: 'svarutkast', info_request: 'svarutkast med spørsmål', quote: 'tilbudsutkast', follow_up: 'oppfølgingsmelding', extra_work: 'spørsmål om tilleggsarbeid' }[d.kind];
+  const run = async (what: NonNullable<typeof busy>, fn: () => Promise<unknown>) => { setBusy(what); try { return await fn(); } finally { setBusy(null); } };
+
+  const approve = () => run('approve', async () => { if (await actions.approveDraft(d.id, { subject: form.subject, body: form.body, language: form.language })) clear(); });
+  const save = () => run('save', async () => { if (await actions.saveApproved(d.id, { subject: form.subject, body: form.body, email: form.email, language: form.language })) clear(); });
+  const send = () => run('send', async () => {
+    if (dirty && !(await actions.saveApproved(d.id, { subject: form.subject, body: form.body, email: form.email, language: form.language }))) return;
+    if (await actions.sendApproved(d.id)) clear();
+    setMode('view');
+  });
+  const translateTo = (lang: string) => run('translate', async () => {
+    const r = await actions.translateDraft(d.id, lang, form.subject, form.body);
+    if (r) set({ subject: r.subject, body: r.body, language: lang });
+  });
+  const mailto = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(form.subject)}&body=${encodeURIComponent(form.body)}`;
 
   return (
-    <section className={cx('rounded-xl border-2 border-dashed p-4', d.state === 'send_failed' ? 'border-bad/60 bg-bad-soft/40' : 'border-accent/50 bg-accent-soft/40')} aria-label="Utkast til godkjenning">
+    <section className={cx('rounded-xl border-2 p-4', d.error ? 'border-bad/60 bg-bad-soft/40' : inQueue ? 'border-ok/50 bg-ok-soft/40' : 'border-dashed border-accent/50 bg-accent-soft/40')} aria-label={inQueue ? 'Klar for sending' : 'Utkast til godkjenning'}>
       <div className="mb-3 flex flex-wrap items-center gap-3">
         {ag && <Portrait p={ag.portrait} size={40} />}
         <div className="min-w-0 flex-1">
-          <p className="text-[13px]"><b>{ag?.name ?? tenant.owner.firstName}</b> har laget et {kindLabel} <span className="text-muted">(v{d.version})</span></p>
-          <p className="text-xs font-bold uppercase tracking-wider text-accent-ink">AI-forslag · ikke sendt</p>
+          <p className="text-[13px]"><b>{ag?.name ?? tenant.owner.firstName}</b> {d.author === 'owner' ? 'skrev en melding' : `har laget et ${kindLabel}`} <span className="text-muted">(v{d.version})</span></p>
+          {inQueue
+            ? <p className="text-xs font-bold uppercase tracking-wider text-ok">Godkjent{d.decidedAt ? ` ${fmtDateTime(d.decidedAt)}` : ''} · ikke sendt</p>
+            : <p className="text-xs font-bold uppercase tracking-wider text-accent-ink">AI-forslag · ikke godkjent</p>}
         </div>
-        {d.state === 'send_failed' && <span className="rounded-full bg-bad px-2 py-0.5 text-xs font-bold text-surface">Sending feilet · ingenting ble sendt</span>}
+        {d.editedBy && inQueue && <span className="rounded-full bg-surface px-2 py-0.5 text-[11px] font-semibold text-muted">Redigert av {d.editedBy.split('@')[0]}</span>}
       </div>
 
-      <div className="mb-3 grid gap-2 sm:grid-cols-2">
-        <div className="rounded-lg bg-surface px-3 py-2">
-          <p className="label mb-0.5">Hvorfor dette svaret</p>
-          <p className="text-[13px] text-ink">{d.rationale}</p>
+      {d.error && <p className="mb-3 rounded-lg bg-bad-soft px-3 py-2 text-[13px] text-bad"><b>Sending feilet. Ingenting ble sendt.</b> {d.error}</p>}
+
+      {!inQueue && (
+        <div className="mb-3 grid gap-2 sm:grid-cols-2">
+          <div className="rounded-lg bg-surface px-3 py-2">
+            <p className="label mb-0.5">Hvorfor dette svaret</p>
+            <p className="text-[13px] text-ink">{d.rationale}</p>
+            {d.feedback && <p className="mt-1 text-xs text-muted">Skrevet på nytt etter beskjed: «{d.feedback}»</p>}
+          </div>
+          <div className="rounded-lg bg-surface px-3 py-2">
+            <p className="label mb-0.5">Mangler</p>
+            {d.missing.length ? <ul className="text-[13px]">{d.missing.map((m) => <li key={m}>• {m}</li>)}</ul> : <p className="text-[13px] text-muted">Ingenting vesentlig.</p>}
+          </div>
         </div>
-        <div className="rounded-lg bg-surface px-3 py-2">
-          <p className="label mb-0.5">Mangler</p>
-          {d.missing.length ? <ul className="text-[13px]">{d.missing.map((m) => <li key={m}>• {m}</li>)}</ul> : <p className="text-[13px] text-muted">Ingenting vesentlig.</p>}
-        </div>
-      </div>
-      {d.requiresHumanJudgement.length > 0 && (
+      )}
+      {!inQueue && d.requiresHumanJudgement.length > 0 && (
         <div className="mb-3 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2">
           <p className="label mb-0.5 !text-warn">Krever din vurdering</p>
           <ul className="text-[13px]">{d.requiresHumanJudgement.map((m) => <li key={m} className="flex gap-1.5"><Icon name="alert" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" />{m}</li>)}</ul>
@@ -111,40 +152,80 @@ function ApprovalPanel({ d }: { d: Draft }) {
       )}
 
       <div className="flex flex-col gap-2">
+        {inQueue && <>
+          <label className="text-xs font-semibold text-muted" htmlFor={`to-${d.id}`}>Til</label>
+          <input id={`to-${d.id}`} type="email" className="field" value={form.email} placeholder={kase.customer.email} onChange={(e) => set({ email: e.target.value })} disabled={sending || !canAct} />
+        </>}
         <label className="text-xs font-semibold text-muted" htmlFor={`subj-${d.id}`}>Emne</label>
-        <input id={`subj-${d.id}`} className="field" value={subject} onChange={(e) => setSubject(e.target.value)} disabled={sending} />
-        <label className="text-xs font-semibold text-muted" htmlFor={`body-${d.id}`}>Melding til {kase.customer.name} &lt;{kase.customer.email}&gt; {edited && <span className="text-accent-ink">· redigert av deg</span>}</label>
-        <textarea id={`body-${d.id}`} className="field min-h-[200px] font-sans leading-relaxed" value={body} onChange={(e) => setBody(e.target.value)} disabled={sending} />
+        <input id={`subj-${d.id}`} className="field" value={form.subject} onChange={(e) => set({ subject: e.target.value })} disabled={sending || !canAct} />
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <label className="text-xs font-semibold text-muted" htmlFor={`body-${d.id}`}>Melding{!inQueue && <> til {kase.customer.name} &lt;{kase.customer.email}&gt;</>}</label>
+          {canAct && !sending && (
+            <div className="flex flex-wrap gap-1" role="group" aria-label="Språk">
+              {LANG_BUTTONS.map(([id, label]) => (
+                <button key={id} type="button" disabled={!!busy} onClick={() => void translateTo(id)}
+                  className={cx('rounded-full border px-2 py-0.5 text-[11px] font-semibold', form.language === id ? 'border-brand bg-brand text-surface' : 'border-line bg-surface text-muted hover:text-ink')}>{busy === 'translate' && form.language !== id ? '…' : label}</button>
+              ))}
+            </div>
+          )}
+        </div>
+        <textarea id={`body-${d.id}`} className="field min-h-[200px] font-sans leading-relaxed" value={form.body} onChange={(e) => set({ body: e.target.value })} disabled={sending || !canAct} />
+        {dirty && !sending && (
+          <p className="flex flex-wrap items-center gap-2 text-xs font-semibold text-accent-ink">
+            {inQueue ? 'Ulagrede endringer.' : 'Endret – det er denne versjonen som godkjennes.'}
+            <button className="underline" onClick={reset}>Tilbakestill</button>
+          </p>
+        )}
       </div>
 
       {mode === 'reject' && (
         <div className="mt-3 flex flex-col gap-2 rounded-lg bg-surface p-3">
-          <label htmlFor={`rej-${d.id}`} className="text-xs font-semibold">Hvorfor avvises forslaget? (valgfritt, lagres i loggen)</label>
+          <label htmlFor={`rej-${d.id}`} className="text-xs font-semibold">Hvorfor avvises utkastet? (valgfritt, lagres i loggen)</label>
           <input id={`rej-${d.id}`} className="field" value={note} onChange={(e) => setNote(e.target.value)} placeholder="F.eks. kunden er allerede ringt" />
-          <div className="flex gap-2"><button className="btn btn-danger" onClick={() => actions.rejectDraft(d.id, note)}>Avvis utkastet</button><button className="btn btn-ghost" onClick={() => setMode('view')}>Avbryt</button></div>
+          <div className="flex gap-2"><button className="btn btn-danger" onClick={() => { clear(); actions.rejectDraft(d.id, note); }}>Avvis utkastet</button><button className="btn btn-ghost" onClick={() => setMode('view')}>Avbryt</button></div>
         </div>
       )}
       {mode === 'regen' && (
         <div className="mt-3 flex flex-col gap-2 rounded-lg bg-surface p-3">
-          <label htmlFor={`regen-${d.id}`} className="text-xs font-semibold">Hva bør {ag?.name ?? 'agenten'} gjøre annerledes?</label>
+          <label htmlFor={`regen-${d.id}`} className="text-xs font-semibold">Beskjed til {ag?.name ?? 'agenten'} (valgfritt)</label>
           <input id={`regen-${d.id}`} className="field" value={note} onChange={(e) => setNote(e.target.value)} placeholder="F.eks. kortere, og foreslå befaring torsdag" />
-          <div className="flex gap-2"><button className="btn btn-primary" onClick={() => actions.regenerate(d.id, note)}><Icon name="refresh" />Lag nytt forslag</button><button className="btn btn-ghost" onClick={() => setMode('view')}>Avbryt</button></div>
+          <div className="flex gap-2">
+            <button className="btn btn-primary" disabled={!!busy} onClick={() => void run('rewrite', async () => { clear(); await actions.regenerate(d.id, note); })}><Icon name="refresh" />{busy === 'rewrite' ? 'Skriver …' : 'Skriv på nytt'}</button>
+            <button className="btn btn-ghost" onClick={() => setMode('view')}>Avbryt</button>
+          </div>
         </div>
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {shadow ? <CopyButton text={body} /> : (
-          <button className="btn btn-accent" disabled={sending || !canSend} onClick={() => actions.approveAndSend(d.id, { subject, body })}>
-            {sending ? <><span className="h-2 w-2 rounded-full bg-white pulse" />Sender · venter på bekreftelse</> : <><Icon name="send" />{d.state === 'send_failed' ? 'Prøv å sende igjen' : edited ? 'Godkjenn og send redigert versjon' : 'Godkjenn og send'}</>}
-          </button>
-        )}
-        <button className="btn btn-ghost" disabled={sending} onClick={() => { setMode('regen'); setNote(''); }}><Icon name="refresh" />Nytt forslag</button>
-        <button className="btn btn-danger" disabled={sending} onClick={() => { setMode('reject'); setNote(''); }}><Icon name="x" />Avvis</button>
-        {edited && !sending && <button className="btn btn-ghost" onClick={() => { setSubject(d.subject); setBody(d.body); }}>Tilbakestill</button>}
+        {!inQueue && <>
+          <button className="btn btn-accent" disabled={!!busy || !canAct} onClick={() => void approve()}><Icon name="check" />{busy === 'approve' ? 'Godkjenner …' : dirty ? 'Godkjenn redigert versjon' : 'Godkjenn'}</button>
+          <button className="btn btn-ghost" disabled={!!busy || !canAct} onClick={() => { setMode('regen'); setNote(''); }}><Icon name="refresh" />Skriv på nytt</button>
+          <button className="btn btn-danger" disabled={!!busy || !canAct} onClick={() => { setMode('reject'); setNote(''); }}><Icon name="x" />Avvis</button>
+        </>}
+        {inQueue && <>
+          {!shadow && mode !== 'confirm' && (
+            <button className="btn btn-accent" disabled={sending || !!busy || !canAct} onClick={() => setMode('confirm')}>
+              {sending ? <><span className="h-2 w-2 rounded-full bg-white pulse" />Sender · venter på bekreftelse</> : <><Icon name="send" />{d.error ? 'Prøv å sende igjen' : 'Send'}</>}
+            </button>
+          )}
+          {!shadow && mode === 'confirm' && <>
+            <button className="btn btn-accent" disabled={!!busy} onClick={() => void send()}><Icon name="send" />{busy === 'send' ? 'Sender …' : `Bekreft: send til ${to}`}</button>
+            <button className="btn btn-ghost" disabled={!!busy} onClick={() => setMode('view')}>Avbryt</button>
+          </>}
+          {dirty && mode !== 'confirm' && !sending && <button className="btn btn-ghost" disabled={!!busy || !canAct} onClick={() => void save()}>{busy === 'save' ? 'Lagrer …' : 'Lagre endringer'}</button>}
+          {mode !== 'confirm' && !sending && <>
+            <a className="btn btn-ghost" href={mailto}><Icon name="mail" />Åpne i e-post</a>
+            <CopyButton text={form.body} />
+            <button className="btn btn-ghost" disabled={!!busy || !canAct} onClick={() => { setMode('regen'); setNote(''); }}><Icon name="refresh" />Skriv på nytt</button>
+            <button className="btn btn-danger" disabled={!!busy || !canAct} onClick={() => { setMode('reject'); setNote(''); }}><Icon name="x" />Avvis</button>
+          </>}
+        </>}
       </div>
       <p className="mt-2 text-[11px] text-muted">
-        {shadow ? <>Sending er av (skyggemodus). Kopier teksten og svar fra Outlook. Svaret ditt kobles til saken automatisk, og utkastet legges bort.</>
-          : canSend ? <>Sendes fra {tenant.mail.mailbox} i samme e-posttråd. Meldingen vises som sendt først når e-postleverandøren har bekreftet.</> : <>Din rolle kan lese, men ikke godkjenne eller sende.</>}
+        {!canAct ? <>Din rolle kan lese, men ikke godkjenne eller sende.</>
+          : !inQueue ? <>Ingenting sendes når du godkjenner. Godkjente utkast legges klare for sending, og du sender med et eget klikk.</>
+          : shadow ? <>Sending fra Agentkontoret er slått av. Åpne i e-post eller kopier teksten, og send fra Outlook. Svaret ditt knyttes til saken automatisk.</>
+          : <>Sendes fra {tenant.mail.mailbox} i samme e-posttråd. Meldingen vises som sendt først når Microsoft har bekreftet.</>}
       </p>
     </section>
   );
@@ -157,6 +238,7 @@ function Composer({ caseId, onDone }: { caseId: string; onDone: () => void }) {
   const [subject, setSubject] = useState(last ? (last.subject.startsWith('SV:') ? last.subject : `SV: ${last.subject}`) : c.title);
   const [body, setBody] = useState(`Hei ${c.customer.name.split(' ')[0]},\n\n\n\n${tenant.signature}`);
   const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState(false);
   const shadow = useShadowMode();
   return (
     <section className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-4">
@@ -166,12 +248,16 @@ function Composer({ caseId, onDone }: { caseId: string; onDone: () => void }) {
       <label className="sr-only" htmlFor={`mb-${caseId}`}>Melding</label>
       <textarea id={`mb-${caseId}`} className="field min-h-[160px]" value={body} onChange={(e) => setBody(e.target.value)} />
       <div className="flex flex-wrap items-center gap-2">
-        {shadow ? <CopyButton text={body} /> : (
-          <button className="btn btn-primary" disabled={busy || state.role !== 'owner'} onClick={async () => { setBusy(true); await actions.sendManual(caseId, subject, body); setBusy(false); onDone(); }}>
-            <Icon name="send" />{busy ? 'Sender …' : `Send til ${c.customer.email}`}
+        {shadow ? <CopyButton text={body} /> : !confirm ? (
+          <button className="btn btn-primary" disabled={busy || state.role !== 'owner' || !body.trim()} onClick={() => setConfirm(true)}>
+            <Icon name="send" />Send
+          </button>
+        ) : (
+          <button className="btn btn-accent" disabled={busy} onClick={async () => { setBusy(true); await actions.sendManual(caseId, subject, body); setBusy(false); onDone(); }}>
+            <Icon name="send" />{busy ? 'Sender …' : `Bekreft: send til ${c.customer.email}`}
           </button>
         )}
-        <button className="btn btn-ghost" onClick={onDone}>Avbryt</button>
+        <button className="btn btn-ghost" onClick={() => (confirm ? setConfirm(false) : onDone())}>Avbryt</button>
       </div>
       {shadow && <p className="text-[11px] text-muted">Sending er av (skyggemodus). Kopier teksten og send fra Outlook.</p>}
     </section>
@@ -190,7 +276,7 @@ export function CaseDetail({ caseId, onClose }: { caseId: string | null; onClose
   if (!caseId) return null;
   if (!c) return <Modal open onClose={onClose} title="Sak"><p className="p-5 text-muted">Saken finnes ikke lenger.</p></Modal>;
 
-  const draft = [...state.drafts].reverse().find((d) => d.caseId === c.id && (d.state === 'pending' || d.state === 'send_failed' || (d.state === 'approved' && state.sending[d.id])));
+  const draft = [...state.drafts].reverse().find((d) => d.caseId === c.id && (d.state === 'pending' || d.state === 'approved' || d.state === 'sending' || d.state === 'send_failed'));
   const busyAgent = (Object.entries(state.busy) as [string, { caseId?: string; text: string } | undefined][]).find(([, b]) => b?.caseId === c.id);
   const ag = tenant.agents.find((a) => a.id === c.assignedAgent)!;
   const canQuote = c.status === 'ready_for_quote';

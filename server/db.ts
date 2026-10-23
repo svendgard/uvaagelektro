@@ -207,6 +207,25 @@ CREATE TABLE IF NOT EXISTS activities (
 CREATE INDEX IF NOT EXISTS activities_tenant_at ON activities(tenant_id, at DESC);
 `,
   },
+  {
+    // Godkjenning og sending i to steg: forslag → godkjent (Send-kø) → sendt. Agentens original tas vare på.
+    version: 4,
+    sql: `
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS original_subject text;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS original_body text;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS edited_by text;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS decided_by text;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS decided_at timestamptz;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS recipient text;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS language text NOT NULL DEFAULT 'no';
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS sending_at timestamptz;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS sent_by text;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS sent_to text;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS message_id text;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS feedback text;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS rewritten boolean NOT NULL DEFAULT false
+`,
+  },
 ];
 
 export async function migrate(db: Db): Promise<void> {

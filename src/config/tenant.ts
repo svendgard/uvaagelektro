@@ -20,7 +20,11 @@ export interface TenantConfig {
     msTenantId?: string;
     /** Avsendere/emner som aldri skal bli saker. */
     ignoreRules: { fromContains?: string; subjectContains?: string }[];
+    /** Sending fra Agentkontoret er på fra tilkoblingen. Alt krever fortsatt «Godkjenn» og «Send». Av = skyggemodus. */
+    sendingOnConnect?: boolean;
   };
+  /** Retningslinjer for tone og innhold i e-poster agentene skriver. Redigerbar per kunde. */
+  writingBrief?: string;
   /** Godkjente prismaler. AIOliver kan bare bruke tall herfra. Eksempeltall, må erstattes av Espens egne. */
   priceTemplates: { id: string; jobType: JobType; label: string; amount: number; unit: string; note: string }[];
   rules: {
@@ -52,6 +56,31 @@ export interface TenantConfig {
   /** Dokumentasjon som kreves per oppdragstype før kontroll. */
   docRequirements: Record<JobType, DocKey[]>;
 }
+
+/**
+ * Skrivestil for e-post fra Uvaag Elektro. Endre her for å justere tone og innhold.
+ * Brukes av AIOliver og AINora i alle utkast, og når Espen ber om «Skriv på nytt».
+ */
+export const CONTACT_BRIEF_UVAAG = `Tone: vennlig, rett på sak og jordnær, slik en erfaren elektriker skriver. «Hei Kari,» som åpning. Du-form. Ingen utropstegn i hver setning, ingen emojier, ingen salgsfraser.
+Lengde: kort. Vanligvis 3–8 linjer før signaturen. Ett tema per avsnitt. Spørsmål til kunden som punktliste når det er flere.
+Innhold: svar på det kunden faktisk spør om. Bruk bare opplysninger som står i e-posttråden eller i godkjente prismaler. Dikt aldri opp navn, telefonnummer, adresser, datoer, priser eller tekniske løsninger. Nevn aldri interne systemer (Agentkontoret, AI, agenter, CRM, database, saksnummer).
+Avslutning: én konkret neste handling (f.eks. «Send gjerne et bilde av sikringsskapet, så gir vi deg en pris.»). Deretter signaturen nøyaktig som oppgitt.
+
+Riktig tone:
+«Hei Kari,
+
+Takk for henvendelsen. Vi monterer gjerne elbillader i carporten.
+
+For å gi deg en pris trenger vi:
+• Bilde av sikringsskapet
+• Omtrentlig avstand fra skapet til carporten
+
+Med vennlig hilsen
+Espen Uvaag
+Uvaag Elektro AS»
+
+Feil tone (for lang, for selgende, lover ting):
+«Hei og tusen takk for din fantastiske henvendelse!!! Vi i Uvaag Elektro er Norges beste … Vi kan komme allerede i morgen og prisen blir ca. 15 000 kr …»`;
 
 const uvaagElektroBase: TenantConfig = {
   id: 'uvaag-elektro',
@@ -155,7 +184,9 @@ const uvaagElektroBase: TenantConfig = {
     mailbox: 'espen@uvaagelektro.no',
     msTenantId: 'e5ffd32d-3bdd-4dd5-bcd3-8fd2ceb427b6',
     ignoreRules: [{ fromContains: 'nyhetsbrev' }, { fromContains: 'noreply' }, { subjectContains: 'Ukens tilbud' }],
+    sendingOnConnect: true,
   },
+  writingBrief: CONTACT_BRIEF_UVAAG,
   priceTemplates: [],
   rules: {
     responseTargetHours: 24,

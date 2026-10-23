@@ -49,7 +49,7 @@ export interface Helpers {
   requireUser: (c: Context<Env>, next: Next) => Promise<Response | void>;
   requireSuperadmin: (c: Context<Env>, next: Next) => Promise<Response | void>;
   audit: (actor: { id?: string; email: string }, action: string, detail?: string) => Promise<unknown>;
-  err: (c: Context, status: 400 | 401 | 403 | 404 | 409 | 429, message: string) => Response;
+  err: (c: Context, status: 400 | 401 | 403 | 404 | 409 | 429 | 502, message: string) => Response;
   body: (c: Context) => Promise<Record<string, unknown>>;
   now: () => number;
 }
@@ -75,7 +75,7 @@ export function createApp(o: AppOptions) {
   const startedAt = now();
 
   const ip = (c: Context) => (c.req.header('x-forwarded-for')?.split(',')[0].trim() || c.req.header('x-real-ip') || 'ukjent').slice(0, 64);
-  const err = (c: Context, status: 400 | 401 | 403 | 404 | 409 | 429, message: string) => c.json({ error: message }, status);
+  const err = (c: Context, status: 400 | 401 | 403 | 404 | 409 | 429 | 502, message: string) => c.json({ error: message }, status);
   const audit = (actor: { id?: string; email: string }, action: string, detail = '') =>
     db.query('INSERT INTO audit_log(at, actor_user_id, actor_email, action, detail) VALUES ($5,$1,$2,$3,$4)', [actor.id ?? null, actor.email, action, detail, new Date(now())]);
 

@@ -131,12 +131,20 @@ export class Graph {
     return r.value.filter((a) => !a.isInline);
   }
 
-  /** Svar i samme tråd. Lager først et utkast i Outlook, så sendes det. */
-  async reply(messageId: string, text: string, subject?: string): Promise<{ draftId: string }> {
-    const draft = await this.call<{ id: string; subject?: string }>('POST', `/me/messages/${encodeURIComponent(messageId)}/createReply`, { comment: text });
-    if (subject && subject !== draft.subject) await this.call('PATCH', `/me/messages/${encodeURIComponent(draft.id)}`, { subject });
+  /** Svar i samme tråd. Lager først et utkast i Outlook, justerer emne/mottaker, og sender. */
+  async reply(messageId: string, text: string, subject?: string, to?: string): Promise<{ draftId: string }> {
+    const draft = await this.call<{ id: string; subject?: string; toRecipients?: GraphAddress[] }>('POST', `/me/messages/${encodeURIComponent(messageId)}/createReply`, { comment: text });
+    const patch: Record<string, unknown> = {};
+    if (subject && subject !== draft.subject) patch.subject = subject;
+    if (to && !(draft.toRecipients ?? []).some((r) => r.emailAddress.address?.toLowerCase() === to.toLowerCase())) patch.toRecipients = [{ emailAddress: { address: to } }];
+    if (Object.keys(patch).length) await this.call('PATCH', `/me/messages/${encodeURIComponent(draft.id)}`, patch);
     await this.call('POST', `/me/messages/${encodeURIComponent(draft.id)}/send`);
     return { draftId: draft.id };
+  }
+
+  /** Ny e-post (når det ikke finnes en innkommende e-post å svare på). */
+  async sendNew(to: string, subject: string, text: string): Promise<void> {
+    await this.call('POST', '/me/sendMail', { message: { subject, body: { contentType: 'Text', content: text }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true });
   }
 }
 

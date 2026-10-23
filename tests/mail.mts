@@ -21,6 +21,7 @@ const calls: { url: string; method: string; body?: string }[] = [];
 let meMail = 'espen@uvaagelektro.no';
 let tid = MS_TENANT;
 let refreshFails = false;
+let sendFails = false;
 const inbox: any[] = [];
 const sent: any[] = [];
 const msg = (id: string, conv: string, from: string, name: string, subject: string, body: string, at: string, extra: any = {}) =>
@@ -42,11 +43,13 @@ const fakeFetch: typeof fetch = async (input: any, init: any = {}) => {
   if (url.includes('/mailFolders/sentitems/messages')) return json({ value: sent.filter((m) => m.receivedDateTime >= decodeURIComponent(url).match(/ge (\S+)&/)![1]) });
   if (url.includes('/attachments')) return json({ value: [{ id: 'a1', name: 'sikringsskap.jpg', size: 204800, contentType: 'image/jpeg', isInline: false }] });
   if (url.includes('/createReply')) return json({ id: 'draft-' + Math.random(), subject: 'SV: x' });
-  if (/\/messages\/[^/]+\/send$/.test(url)) return new Response(null, { status: 202 });
+  if (/\/messages\/[^/]+\/send$/.test(url)) return sendFails ? json({ error: { message: 'Mailbox busy' } }, 400) : new Response(null, { status: 202 });
+  if (url.endsWith('/me/sendMail')) return new Response(null, { status: 202 });
   if (method === 'PATCH' && /\/me\/messages\/[^/]+$/.test(url)) return json({ id: 'patched' });
   if (url.includes('api.anthropic.com')) {
     const b = JSON.parse(init.body);
     const user: string = b.messages[0].content;
+    if (b.tools[0].name === 'oversatt') return json({ content: [{ type: 'tool_use', name: 'oversatt', input: { subject: 'RE: EV charger', body: 'Hi Test,\n\nThanks for your enquiry.' } }] });
     if (b.tools[0].name === 'registrer_vurdering') {
       const isNews = user.includes('Kampanje');
       return json({ content: [{ type: 'tool_use', name: 'registrer_vurdering', input: isNews ? { is_customer_inquiry: false, reason: 'Reklame fra leverandør', job_type: 'feilsoking', customer: { name: 'x', email: 'x' }, title: 'x', summary: 'x', missing_info: [], priority: 'low', urgent: { is_urgent: false }, injection_suspected: false }
@@ -125,8 +128,8 @@ const u3 = new URL((await espen.req('POST', '/api/mail/connect')).json.url);
 assert.equal((await espen.req('GET', `/api/microsoft/callback?code=abc&state=${u3.searchParams.get('state')}`)).location, '/?microsoft=tilkoblet');
 const conn = (await pg.query<any>('SELECT * FROM mail_connections')).rows[0];
 assert.ok(conn.refresh_token_enc.startsWith('v1.') && !conn.refresh_token_enc.includes('RT-secret'));
-assert.equal(conn.sending_enabled, false);
-ok('Riktig konto kobles til. Token kryptert. Skyggemodus er standard.');
+assert.equal(conn.sending_enabled, true);
+ok('Riktig konto kobles til. Token kryptert. Sending er på fra start (krever fortsatt godkjenning).');
 
 // 5. Synk: én kundesak, reklame og automatisk e-post sorteres bort, gammel e-post hentes ikke
 await new Promise((r) => setTimeout(r, 50));
@@ -154,26 +157,48 @@ assert.equal(s1.drafts[0].state, 'pending');
 assert.equal(s1.ignored.length, 2);
 ok('State-API returnerer saker, tråd, vedlegg og utkast');
 
-// 7. Skyggemodus: sending stoppes. Superadmin kan ikke sende.
+// 7. Godkjenning: må godkjennes før sending, bare eieren, to samtidige godkjenninger gir 200 og 409, original tas vare på
 const draftId = s1.drafts[0].id;
-assert.equal((await espen.req('POST', `/api/drafts/${draftId}/send`, {})).status, 409);
-assert.equal((await sa.req('POST', `/api/drafts/${draftId}/send`, {})).status, 403);
-assert.ok(!calls.some((c) => c.url.includes('createReply')));
-ok('Skyggemodus stopper sending. Superadmin kan aldri sende.');
+const agentBody = s1.drafts[0].body;
+assert.equal((await espen.req('POST', `/api/drafts/${draftId}/send`)).status, 409, 'ikke godkjent ennå');
+assert.equal((await sa.req('POST', `/api/drafts/${draftId}/approve`, {})).status, 403);
+assert.equal((await sa.req('POST', `/api/drafts/${draftId}/send`)).status, 403);
+const edited = 'Hei Test,\n\nRedigert av Espen.\n\nHilsen Espen';
+const both = await Promise.all([
+  espen.req('POST', `/api/drafts/${draftId}/approve`, { body: edited }),
+  espen.req('POST', `/api/drafts/${draftId}/approve`, { body: 'Annen versjon' }),
+]);
+assert.deepEqual(both.map((r) => r.status).sort(), [200, 409]);
+const ap = (await espen.req('GET', '/api/state')).json.drafts.find((d: any) => d.id === draftId);
+assert.equal(ap.state, 'approved');
+assert.equal(ap.original.body, agentBody, 'agentens original tas vare på');
+assert.equal(ap.editedBy, 'espen@uvaagelektro.no');
+assert.equal(ap.decidedBy, 'espen@uvaagelektro.no');
+assert.ok(!calls.some((c) => c.url.includes('createReply')), 'godkjenning sender ingenting');
+ok('Godkjenn: kreves før sending, bare eieren, dobbel godkjenning gir 200/409, original og redigerer lagres');
 
-// 8. Sending på: sendes én gang, i samme tråd, ikke to ganger
-assert.equal((await espen.req('POST', '/api/mail/settings', { sending_enabled: true })).status, 403);
+// 8. Send-kø: redigering til sending, skyggemodus stopper, redigert tekst og mottaker brukes, aldri dobbelt, ingen endring etter sending
+assert.equal((await espen.req('PUT', `/api/drafts/${draftId}/text`, { email: 'ikke-en-epost' })).status, 400);
+assert.equal((await espen.req('PUT', `/api/drafts/${draftId}/text`, { body: edited + '\nPS: Ring gjerne.', email: 'kunde2@test.no' })).status, 200);
+assert.equal((await espen.req('POST', '/api/mail/settings', { sending_enabled: false })).status, 403);
+assert.equal((await sa.req('POST', '/api/mail/settings', { sending_enabled: false })).status, 200);
+assert.equal((await espen.req('POST', `/api/drafts/${draftId}/send`)).status, 409, 'skyggemodus');
 assert.equal((await sa.req('POST', '/api/mail/settings', { sending_enabled: true })).status, 200);
-const send = await espen.req('POST', `/api/drafts/${draftId}/send`, { body: 'Hei Test,\n\nRedigert av Espen.\n\nHilsen Espen' });
-assert.equal(send.status, 200);
-assert.equal((await espen.req('POST', `/api/drafts/${draftId}/send`, {})).status, 409);
+const sendTwice = await Promise.all([espen.req('POST', `/api/drafts/${draftId}/send`), espen.req('POST', `/api/drafts/${draftId}/send`)]);
+assert.deepEqual(sendTwice.map((r) => r.status).sort(), [200, 409]);
+assert.equal((await espen.req('POST', `/api/drafts/${draftId}/send`)).status, 409);
 const replies = calls.filter((c) => c.url.includes('/messages/m1/createReply'));
 assert.equal(replies.length, 1);
-assert.match(replies[0].body!, /Redigert av Espen/);
+assert.match(replies[0].body!, /Redigert av Espen\.[\s\S]*PS: Ring gjerne/);
+assert.ok(calls.some((c) => c.method === 'PATCH' && c.body!.includes('kunde2@test.no')), 'ny mottaker settes');
+assert.equal((await espen.req('PUT', `/api/drafts/${draftId}/text`, { body: 'for sent' })).status, 409);
+assert.equal((await espen.req('POST', `/api/drafts/${draftId}/reject`, {})).status, 409);
 const s2 = (await espen.req('GET', '/api/state')).json;
 assert.equal(s2.cases[0].status, 'awaiting_customer');
 assert.equal(s2.messages.filter((m: any) => m.direction === 'outbound').length, 1);
-ok('Sending: bare superadmin slår på, svar i samme tråd, redigert tekst brukes, aldri dobbeltsending');
+const sentDraft = s2.drafts.find((d: any) => d.id === draftId);
+assert.equal(sentDraft.state, 'sent'); assert.equal(sentDraft.sentTo, 'kunde2@test.no'); assert.equal(sentDraft.sentBy, 'espen@uvaagelektro.no');
+ok('Send: redigert tekst og mottaker brukes, skyggemodus stopper, aldri dobbeltsending, ingen endring etter sending');
 
 // 9. Neste synk: vår sendte melding i Sendte elementer dupliseres ikke. Kunden svarer → nytt utkast.
 sent.push(msg('s1', 'conv-1', 'espen@uvaagelektro.no', 'Espen', 'SV: Elbillader', 'Hei Test, Redigert av Espen.', '2026-10-23T10:00:30Z'));
@@ -198,6 +223,52 @@ assert.equal(s4.cases[0].status, 'awaiting_customer');
 assert.ok(s4.activities.some((a: any) => a.text.includes('fra Outlook')));
 ok('Svar sendt fra Outlook knyttes til saken, og utkastet legges bort');
 
+// 10b. Ny sak: oversettelse lagres ikke, «skriv på nytt» lager nytt utkast med kontekst, sendefeil frigjør reservasjonen, egen melding
+inbox.push(msg('m5', 'conv-5', 'ny@test.no', 'Ny Kunde', 'Lys i stua', 'Hei, vi trenger nye spotter i stua.', '2026-10-23T10:45:00Z'));
+clock = Date.parse('2026-10-23T10:46:00Z');
+await mail.syncOnce();
+let st5 = (await espen.req('GET', '/api/state')).json;
+const d5 = st5.drafts.find((d: any) => d.state === 'pending' && d.caseId !== s1.cases[0].id);
+assert.ok(d5, 'nytt utkast');
+const tr = await espen.req('POST', `/api/drafts/${d5.id}/translate`, { language: 'en', subject: d5.subject, body: 'Hei Test,\n\nTakk for henvendelsen. (egen endring)' });
+assert.equal(tr.status, 200); assert.equal(tr.json.language, 'en'); assert.match(tr.json.body, /Thanks/);
+assert.equal((await espen.req('POST', `/api/drafts/${d5.id}/translate`, { language: 'xx', subject: '', body: '' })).status, 400);
+const after = (await pg.query<any>('SELECT body, language, state FROM drafts WHERE id = $1', [d5.id])).rows[0];
+assert.equal(after.body, d5.body); assert.equal(after.state, 'pending');
+ok('Oversettelse returnerer tekst og lagrer ingenting');
+
+const before = calls.length;
+const rw = await espen.req('POST', `/api/drafts/${d5.id}/rewrite`, { feedback: 'kortere, og nevn befaring' });
+assert.equal(rw.status, 200); assert.ok(rw.json.id && rw.json.id !== d5.id);
+const rwCall = calls.slice(before).find((c) => c.url.includes('anthropic'))!;
+assert.match(rwCall.body!, /forrige_utkast/); assert.match(rwCall.body!, /kortere, og nevn befaring/);
+st5 = (await espen.req('GET', '/api/state')).json;
+const old5 = st5.drafts.find((d: any) => d.id === d5.id);
+assert.equal(old5.state, 'superseded'); assert.equal(old5.rewritten, true);
+const new5 = st5.drafts.find((d: any) => d.id === rw.json.id);
+assert.equal(new5.state, 'pending'); assert.equal(new5.version, d5.version + 1); assert.equal(new5.feedback, 'kortere, og nevn befaring');
+assert.equal((await espen.req('POST', `/api/drafts/${d5.id}/approve`, {})).status, 409, 'gammelt utkast kan ikke godkjennes');
+ok('Skriv på nytt: gammelt merkes, nytt utkast med forrige tekst og beskjed som kontekst');
+
+assert.equal((await espen.req('POST', `/api/drafts/${new5.id}/approve`, {})).status, 200);
+sendFails = true;
+const failed = await espen.req('POST', `/api/drafts/${new5.id}/send`);
+assert.equal(failed.status, 502);
+const fr = (await pg.query<any>('SELECT state, sending_at, error FROM drafts WHERE id = $1', [new5.id])).rows[0];
+assert.equal(fr.state, 'approved'); assert.equal(fr.sending_at, null); assert.match(fr.error, /Mailbox busy/);
+sendFails = false;
+assert.equal((await espen.req('POST', `/api/drafts/${new5.id}/send`)).status, 200);
+ok('Sendefeil: reservasjonen fjernes, ingenting registreres som sendt, nytt forsøk virker');
+
+const man = await espen.req('POST', `/api/cases/${new5.caseId}/manual`, { subject: 'SV: Lys i stua', body: 'Hei,\n\nVi kommer onsdag.\n\nEspen' });
+assert.equal(man.status, 200);
+const manDraft = (await espen.req('GET', '/api/state')).json.drafts.find((d: any) => d.id === man.json.id);
+assert.equal(manDraft.state, 'approved'); assert.equal(manDraft.author, 'owner');
+assert.equal((await espen.req('POST', `/api/drafts/${man.json.id}/send`)).status, 200);
+const acts = (await espen.req('GET', '/api/state')).json.activities.map((a: any) => a.text).join('\n');
+for (const w of ['godkjente', 'redigerte', 'skrev utkastet på nytt', 'sendte e-post', 'Sending feilet', 'skrev en melding selv']) assert.ok(acts.includes(w), `logget: ${w}`);
+ok('Egen melding går via Send-køen. Alt logges: godkjent, redigert, skrevet på nytt, sendt, feilet.');
+
 // 11. Synkroniseringsrunder registreres for helserapportering
 const lastRun = await mail.latestDeliveredRun();
 assert.ok(lastRun && lastRun.scan_run_id.startsWith('mail-sync-') && lastRun.persisted_at);
@@ -211,5 +282,5 @@ assert.equal(st.status, 'reconnect_required'); assert.equal(st.connected, false)
 assert.equal(await mail.syncOnce(), null);
 ok('Utløpt Microsoft-tilkobling oppdages og vises. Synk stopper uten å krasje.');
 
-console.log(`\n${pass} av 12 tester bestått`);
+console.log(`\n${pass} av 16 tester bestått`);
 process.exit(0);

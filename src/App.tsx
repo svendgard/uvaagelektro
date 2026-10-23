@@ -28,7 +28,7 @@ function Shell({ me, logout, refresh }: { me?: SessionUser; logout?: () => Promi
   const [filter, setFilter] = useState('open');
   const [sim, setSim] = useState(false);
   const nav: Nav = { openCase: setCaseId, openAgent: setAgentId, go: (v) => setView(v as View) };
-  const pending = state.drafts.filter((d) => d.state === 'pending').length;
+  const pending = state.drafts.filter((d) => d.state === 'pending' || d.state === 'approved').length;
   const unread = state.cases.filter((c) => c.unreadCustomerReply).length;
   const toControl = state.cases.filter((c) => c.job && (c.job.stage === 'reported' || c.job.help)).length;
   const allTabs: ({ id: View; label: string; icon: string; badge?: number } | false)[] = [
