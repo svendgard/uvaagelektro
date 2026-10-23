@@ -60,7 +60,7 @@ assert.equal((await sa.req('POST', '/api/auth/accept-invite', { token: tokenOf(b
 assert.equal((await sa.req('POST', '/api/auth/accept-invite', { token: tokenOf(bootUrl), password: 'jorgen-er-flink-123' })).status, 400);
 const acc = await sa.req('POST', '/api/auth/accept-invite', { token: tokenOf(bootUrl), password: 'Lang og trygg setning 42', name: 'Jørgen' });
 assert.equal(acc.status, 200);
-assert.match(acc.setCookie!, /HttpOnly/i); assert.match(acc.setCookie!, /Secure/i); assert.match(acc.setCookie!, /SameSite=Strict/i);
+assert.match(acc.setCookie!, /HttpOnly/i); assert.match(acc.setCookie!, /Secure/i); assert.match(acc.setCookie!, /SameSite=Lax/i);
 assert.equal((await sa.req('GET', '/api/auth/me')).json.user.role, 'superadmin');
 assert.equal((await new Client().req('POST', '/api/auth/accept-invite', { token: tokenOf(bootUrl), password: 'Lang og trygg setning 43' })).status, 404);
 ok('Engangslenke: passordkrav, sikker cookie, kan ikke brukes to ganger');

@@ -16,6 +16,8 @@ export interface TenantConfig {
   mail: {
     provider: 'simulated' | 'microsoft_graph' | 'gmail';
     mailbox: string;
+    /** Kundens Microsoft-miljø (Entra tenant-ID). Bare innlogging herfra godtas. */
+    msTenantId?: string;
     /** Avsendere/emner som aldri skal bli saker. */
     ignoreRules: { fromContains?: string; subjectContains?: string }[];
   };
@@ -151,6 +153,7 @@ const uvaagElektroBase: TenantConfig = {
     provider: 'simulated',
     /** Espens egen postkasse. Inneholder også ikke-kundepost, så AIEmma lagrer kun innhold fra kundehenvendelser. */
     mailbox: 'espen@uvaagelektro.no',
+    msTenantId: 'e5ffd32d-3bdd-4dd5-bcd3-8fd2ceb427b6',
     ignoreRules: [{ fromContains: 'nyhetsbrev' }, { fromContains: 'noreply' }, { subjectContains: 'Ukens tilbud' }],
   },
   priceTemplates: [],

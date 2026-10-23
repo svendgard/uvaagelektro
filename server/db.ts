@@ -88,6 +88,125 @@ CREATE TABLE IF NOT EXISTS mfa_challenges (
 );
 `,
   },
+  {
+    version: 3,
+    sql: `
+CREATE TABLE IF NOT EXISTS mail_connections (
+  tenant_id text PRIMARY KEY,
+  mailbox text NOT NULL,
+  ms_tenant_id text NOT NULL,
+  ms_user_id text NOT NULL,
+  refresh_token_enc text,
+  access_token_enc text,
+  access_expires_at timestamptz,
+  status text NOT NULL DEFAULT 'connected',
+  last_error text,
+  connected_by uuid,
+  connected_at timestamptz NOT NULL DEFAULT now(),
+  inbox_watermark timestamptz,
+  sent_watermark timestamptz,
+  last_sync_at timestamptz,
+  sending_enabled boolean NOT NULL DEFAULT false
+);
+CREATE TABLE IF NOT EXISTS oauth_states (
+  state_hash text PRIMARY KEY,
+  user_id uuid NOT NULL,
+  code_verifier text NOT NULL,
+  expires_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mail_sync_runs (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL,
+  started_at timestamptz NOT NULL,
+  completed_at timestamptz,
+  persisted_at timestamptz,
+  fetched integer NOT NULL DEFAULT 0,
+  new_cases integer NOT NULL DEFAULT 0,
+  error text
+);
+CREATE INDEX IF NOT EXISTS mail_sync_runs_latest ON mail_sync_runs(tenant_id, persisted_at DESC);
+CREATE TABLE IF NOT EXISTS cases (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL,
+  number text NOT NULL,
+  conversation_id text,
+  title text NOT NULL,
+  status text NOT NULL,
+  priority text NOT NULL DEFAULT 'normal',
+  job_type text NOT NULL,
+  customer jsonb NOT NULL,
+  description text NOT NULL DEFAULT '',
+  summary text NOT NULL DEFAULT '',
+  next_action text NOT NULL DEFAULT '',
+  missing_info jsonb NOT NULL DEFAULT '[]',
+  flagged jsonb,
+  assigned_agent text NOT NULL DEFAULT 'intake',
+  unread boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS cases_number ON cases(tenant_id, number);
+CREATE INDEX IF NOT EXISTS cases_conversation ON cases(tenant_id, conversation_id);
+CREATE TABLE IF NOT EXISTS mail_messages (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL,
+  case_id uuid NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  graph_id text,
+  conversation_id text,
+  direction text NOT NULL,
+  from_addr jsonb NOT NULL,
+  to_addrs jsonb NOT NULL DEFAULT '[]',
+  cc_addrs jsonb NOT NULL DEFAULT '[]',
+  subject text NOT NULL DEFAULT '',
+  body text NOT NULL DEFAULT '',
+  sent_at timestamptz NOT NULL,
+  attachments jsonb NOT NULL DEFAULT '[]',
+  delivery_state text,
+  drafted_by text,
+  approved_by text
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mail_messages_graph ON mail_messages(tenant_id, graph_id) WHERE graph_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS mail_messages_case ON mail_messages(case_id, sent_at);
+CREATE TABLE IF NOT EXISTS triage_log (
+  tenant_id text NOT NULL,
+  graph_id text NOT NULL,
+  decision text NOT NULL,
+  reason text NOT NULL DEFAULT '',
+  sender_domain text NOT NULL DEFAULT '',
+  at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, graph_id)
+);
+CREATE TABLE IF NOT EXISTS drafts (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL,
+  case_id uuid NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  kind text NOT NULL,
+  author text NOT NULL,
+  subject text NOT NULL,
+  body text NOT NULL,
+  rationale text NOT NULL DEFAULT '',
+  missing jsonb NOT NULL DEFAULT '[]',
+  judgement jsonb NOT NULL DEFAULT '[]',
+  version integer NOT NULL DEFAULT 1,
+  state text NOT NULL DEFAULT 'pending',
+  reply_to_graph_id text,
+  created_at timestamptz NOT NULL,
+  sent_at timestamptz,
+  error text
+);
+CREATE INDEX IF NOT EXISTS drafts_case ON drafts(case_id, created_at);
+CREATE TABLE IF NOT EXISTS activities (
+  id bigserial PRIMARY KEY,
+  tenant_id text NOT NULL,
+  at timestamptz NOT NULL DEFAULT now(),
+  actor text NOT NULL,
+  case_id uuid REFERENCES cases(id) ON DELETE SET NULL,
+  text text NOT NULL,
+  tone text
+);
+CREATE INDEX IF NOT EXISTS activities_tenant_at ON activities(tenant_id, at DESC);
+`,
+  },
 ];
 
 export async function migrate(db: Db): Promise<void> {

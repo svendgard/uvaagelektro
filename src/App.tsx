@@ -12,6 +12,7 @@ import { cx } from './lib/util';
 import { DEMO } from './demo';
 import { AccountSecurity, AuthGate } from './components/Auth';
 import { AdminView } from './components/Admin';
+import { MailBanner, useMicrosoftReturn } from './components/MailConnection';
 import type { SessionUser } from './lib/api';
 
 type View = 'office' | 'cases' | 'projects' | 'tech' | 'inbox' | 'log' | 'settings' | 'admin';
@@ -19,6 +20,9 @@ type View = 'office' | 'cases' | 'projects' | 'tech' | 'inbox' | 'log' | 'settin
 function Shell({ me, logout, refresh }: { me?: SessionUser; logout?: () => Promise<void>; refresh?: () => void }) {
   const { state, tenant } = useStore();
   const [view, setView] = useState<View>('office');
+  useMicrosoftReturn();
+  // Bare eieren av postkassen kan koble den til (Microsoft sjekker også at det er riktig konto).
+  const canConnect = me?.role === 'owner' && me.email.toLowerCase() === tenant.mail.mailbox.toLowerCase();
   const [caseId, setCaseId] = useState<string | null>(null);
   const [agentId, setAgentId] = useState<AgentId | null>(null);
   const [filter, setFilter] = useState('open');
@@ -81,9 +85,11 @@ function Shell({ me, logout, refresh }: { me?: SessionUser; logout?: () => Promi
             </button>
           ))}
         </nav>
-        <div className="border-t border-warn/30 bg-warn-soft py-1 text-center text-[11px] font-semibold text-warn" style={{ paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))', paddingRight: 'max(16px, env(safe-area-inset-right, 0px))' }}>
-          {DEMO ? 'Prototype med fiktive data. E-post sendes og mottas kun i simulering.' : 'E-post er ikke koblet til ennå. Saker vises her når Microsoft 365 er tilkoblet.'}
-        </div>
+        {DEMO ? (
+          <div className="border-t border-warn/30 bg-warn-soft py-1 text-center text-[11px] font-semibold text-warn" style={{ paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))', paddingRight: 'max(16px, env(safe-area-inset-right, 0px))' }}>
+            Prototype med fiktive data. E-post sendes og mottas kun i simulering.
+          </div>
+        ) : <MailBanner canConnect={canConnect} />}
       </header>
 
       <main className="mx-auto max-w-[1400px] py-5" style={{ paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))', paddingRight: 'max(16px, env(safe-area-inset-right, 0px))' }}>
@@ -93,7 +99,7 @@ function Shell({ me, logout, refresh }: { me?: SessionUser; logout?: () => Promi
         {view === 'tech' && <TechView />}
         {view === 'inbox' && <InboxView openCase={setCaseId} />}
         {view === 'log' && <LogView openCase={setCaseId} />}
-        {view === 'settings' && <div className="flex flex-col gap-5">{me && <AccountSecurity me={me} onChanged={() => refresh?.()} />}<SettingsView /></div>}
+        {view === 'settings' && <div className="flex flex-col gap-5">{me && <AccountSecurity me={me} onChanged={() => refresh?.()} />}<SettingsView isSuperadmin={me?.role === 'superadmin'} canConnect={canConnect} /></div>}
         {view === 'admin' && me?.role === 'superadmin' && <AdminView me={me} />}
       </main>
 

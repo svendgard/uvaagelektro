@@ -10,7 +10,7 @@
     "build:demo": "DEMO=true ARTIFACT=true vite build",
     "start": "tsx server/index.ts",
     "typecheck": "tsc && tsc -p tsconfig.server.json",
-    "test": "tsx tests/auth.mts && tsx tests/mfa.mts && tsx tests/health.mts && tsx tests/smoke.mts && tsx tests/projects.mts"
+    "test": "tsx tests/auth.mts && tsx tests/mfa.mts && tsx tests/health.mts && tsx tests/smoke.mts && tsx tests/projects.mts && tsx tests/mail.mts"
   },
   "keywords": [],
   "author": "",

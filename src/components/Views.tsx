@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { MailConnectionCard } from './MailConnection';
 import { useStore } from '../state/store';
 import { AUTOMATION_LEVELS } from '../config/tenant';
 import type { UserRole } from '../domain/types';
@@ -111,7 +112,7 @@ export function LogView({ openCase }: { openCase: (id: string) => void }) {
   );
 }
 
-export function SettingsView() {
+export function SettingsView({ isSuperadmin = false, canConnect = false }: { isSuperadmin?: boolean; canConnect?: boolean } = {}) {
   const { state, tenant, actions } = useStore();
   const roles: { id: UserRole; label: string; text: string }[] = [
     { id: 'owner', label: 'Eier (Espen)', text: 'Godkjenner, sender, sletter og endrer innstillinger.' },
@@ -134,18 +135,14 @@ export function SettingsView() {
         </div>
       </section>
 
-      <section className="card p-5">
+      {DEMO ? <section className="card p-5">
         <h2 className="mb-1 font-display text-base font-semibold">E-posttilkobling</h2>
-        <p className="mb-3 text-[13px] text-muted">Koblingen skjer med OAuth. Espen logger inn hos Microsoft eller Google og godkjenner tilgang. Dashboardet ser aldri passordet.</p>
-        <div className="mb-3 flex items-center gap-3 rounded-xl border border-warn/40 bg-warn-soft px-4 py-3 text-[13px]">
+        <p className="mb-3 text-[13px] text-muted">Koblingen skjer med OAuth. Espen logger inn hos Microsoft og godkjenner tilgang. Dashboardet ser aldri passordet.</p>
+        <div className="flex items-center gap-3 rounded-xl border border-warn/40 bg-warn-soft px-4 py-3 text-[13px]">
           <Icon name="plug" className="h-5 w-5 text-warn" />
-          <span>{DEMO ? <><b>Status: simulert.</b> Ingen ekte e-post sendes eller mottas i denne prototypen.</> : <><b>Status: ikke koblet til.</b> Tilkoblingen kommer i neste versjon.</>} Konto som speiles: {tenant.mail.mailbox}.</span>
+          <span><b>Status: simulert.</b> Ingen ekte e-post sendes eller mottas i denne prototypen. Konto som speiles: {tenant.mail.mailbox}.</span>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button className="btn btn-ghost" disabled title="Krever app-registrering i Espens Microsoft 365"><Icon name="lock" />Koble til Microsoft 365</button>
-          <button className="btn btn-ghost" disabled title="Krever OAuth-klient i Google Cloud"><Icon name="lock" />Koble til Google Workspace</button>
-        </div>
-      </section>
+      </section> : <MailConnectionCard isSuperadmin={isSuperadmin} canConnect={canConnect} />}
 
       {DEMO && <section className="card p-5">
         <h2 className="mb-1 font-display text-base font-semibold">Roller og tilgang</h2>

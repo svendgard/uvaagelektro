@@ -51,6 +51,14 @@ function Message({ m }: { m: EmailMessage }) {
   );
 }
 
+/** Skyggemodus: agentene leser og foreslår, men ingenting sendes fra Agentkontoret. */
+export const useShadowMode = () => { const { state } = useStore(); return !DEMO && !(state.mail?.connected && state.mail.sending_enabled); };
+
+function CopyButton({ text, label = 'Kopier tekst' }: { text: string; label?: string }) {
+  const [done, setDone] = useState(false);
+  return <button className="btn btn-accent" onClick={async () => { try { await navigator.clipboard.writeText(text); setDone(true); setTimeout(() => setDone(false), 2000); } catch { /* utilgjengelig */ } }}><Icon name={done ? 'check' : 'file'} />{done ? 'Kopiert' : label}</button>;
+}
+
 function ApprovalPanel({ d }: { d: Draft }) {
   const { tenant, state, actions } = useStore();
   const ag = tenant.agents.find((a) => a.id === d.author);
@@ -62,6 +70,7 @@ function ApprovalPanel({ d }: { d: Draft }) {
   const sending = !!state.sending[d.id];
   const edited = subject !== d.subject || body !== d.body;
   const canSend = state.role === 'owner';
+  const shadow = useShadowMode();
   const kase = state.cases.find((c) => c.id === d.caseId)!;
   const kindLabel = { reply: 'svarutkast', info_request: 'svarutkast med spørsmål', quote: 'tilbudsutkast', follow_up: 'oppfølgingsmelding', extra_work: 'spørsmål om tilleggsarbeid' }[d.kind];
 
@@ -124,15 +133,18 @@ function ApprovalPanel({ d }: { d: Draft }) {
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button className="btn btn-accent" disabled={sending || !canSend} onClick={() => actions.approveAndSend(d.id, { subject, body })}>
-          {sending ? <><span className="h-2 w-2 rounded-full bg-white pulse" />Sender · venter på bekreftelse</> : <><Icon name="send" />{d.state === 'send_failed' ? 'Prøv å sende igjen' : edited ? 'Godkjenn og send redigert versjon' : 'Godkjenn og send'}</>}
-        </button>
+        {shadow ? <CopyButton text={body} /> : (
+          <button className="btn btn-accent" disabled={sending || !canSend} onClick={() => actions.approveAndSend(d.id, { subject, body })}>
+            {sending ? <><span className="h-2 w-2 rounded-full bg-white pulse" />Sender · venter på bekreftelse</> : <><Icon name="send" />{d.state === 'send_failed' ? 'Prøv å sende igjen' : edited ? 'Godkjenn og send redigert versjon' : 'Godkjenn og send'}</>}
+          </button>
+        )}
         <button className="btn btn-ghost" disabled={sending} onClick={() => { setMode('regen'); setNote(''); }}><Icon name="refresh" />Nytt forslag</button>
         <button className="btn btn-danger" disabled={sending} onClick={() => { setMode('reject'); setNote(''); }}><Icon name="x" />Avvis</button>
         {edited && !sending && <button className="btn btn-ghost" onClick={() => { setSubject(d.subject); setBody(d.body); }}>Tilbakestill</button>}
       </div>
       <p className="mt-2 text-[11px] text-muted">
-        {canSend ? <>Sendes fra {tenant.mail.mailbox} i samme e-posttråd. Meldingen vises som sendt først når e-postleverandøren har bekreftet.</> : <>Din rolle kan lese, men ikke godkjenne eller sende.</>}
+        {shadow ? <>Sending er av (skyggemodus). Kopier teksten og svar fra Outlook. Svaret ditt kobles til saken automatisk, og utkastet legges bort.</>
+          : canSend ? <>Sendes fra {tenant.mail.mailbox} i samme e-posttråd. Meldingen vises som sendt først når e-postleverandøren har bekreftet.</> : <>Din rolle kan lese, men ikke godkjenne eller sende.</>}
       </p>
     </section>
   );
@@ -145,6 +157,7 @@ function Composer({ caseId, onDone }: { caseId: string; onDone: () => void }) {
   const [subject, setSubject] = useState(last ? (last.subject.startsWith('SV:') ? last.subject : `SV: ${last.subject}`) : c.title);
   const [body, setBody] = useState(`Hei ${c.customer.name.split(' ')[0]},\n\n\n\n${tenant.signature}`);
   const [busy, setBusy] = useState(false);
+  const shadow = useShadowMode();
   return (
     <section className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-4">
       <p className="text-[13px] font-semibold">Skriv melding selv</p>
@@ -153,11 +166,14 @@ function Composer({ caseId, onDone }: { caseId: string; onDone: () => void }) {
       <label className="sr-only" htmlFor={`mb-${caseId}`}>Melding</label>
       <textarea id={`mb-${caseId}`} className="field min-h-[160px]" value={body} onChange={(e) => setBody(e.target.value)} />
       <div className="flex flex-wrap items-center gap-2">
-        <button className="btn btn-primary" disabled={busy || state.role !== 'owner'} onClick={async () => { setBusy(true); await actions.sendManual(caseId, subject, body); setBusy(false); onDone(); }}>
-          <Icon name="send" />{busy ? 'Sender …' : `Send til ${c.customer.email}`}
-        </button>
+        {shadow ? <CopyButton text={body} /> : (
+          <button className="btn btn-primary" disabled={busy || state.role !== 'owner'} onClick={async () => { setBusy(true); await actions.sendManual(caseId, subject, body); setBusy(false); onDone(); }}>
+            <Icon name="send" />{busy ? 'Sender …' : `Send til ${c.customer.email}`}
+          </button>
+        )}
         <button className="btn btn-ghost" onClick={onDone}>Avbryt</button>
       </div>
+      {shadow && <p className="text-[11px] text-muted">Sending er av (skyggemodus). Kopier teksten og send fra Outlook.</p>}
     </section>
   );
 }

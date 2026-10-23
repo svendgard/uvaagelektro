@@ -7,6 +7,7 @@ import { DEMO } from '../demo';
 import { mailProvider } from '../adapters/mail/SimulatedMailProvider';
 import { agentEngine, missingFor } from '../adapters/ai/SimulatedAgentEngine';
 import { id, sleep } from '../lib/util';
+import { api } from '../lib/api';
 
 /**
  * Lokal demotilstand. I produksjon erstattes denne av et API (database + bakgrunnsjobber),
@@ -29,10 +30,21 @@ export interface AppState {
   role: UserRole;
   /** Montørenes chat med boten (utenfor jobbtrådene). */
   techChat: Record<string, ChatMessage[]>;
+  /** Status for e-posttilkoblingen (kun produksjon). */
+  mail: MailStatus | null;
+  /** Første lasting fra serveren er ferdig. */
+  loaded: boolean;
+}
+
+export interface MailStatus {
+  configured: boolean; ai_configured: boolean; mailbox: string; connected: boolean;
+  status: 'not_connected' | 'connected' | 'reconnect_required' | string;
+  last_error: string | null; last_sync_at: string | null; connected_at: string | null; sending_enabled: boolean;
+  last_run: { started_at: string; ok: boolean; error: string | null; fetched: number; new_cases: number } | null;
 }
 
 function initial(role: UserRole = 'owner'): AppState {
-  const base = { busy: {}, sending: {}, toasts: [], role };
+  const base = { busy: {}, sending: {}, toasts: [], role, mail: null, loaded: DEMO };
   if (DEMO) return { ...demoData.buildDemoState(), ...base, completed: { intake: 6, quote: 4, followup: 3, coordinator: 9, control: 5 } };
   return {
     ...base, cases: [], messages: [], drafts: [], activities: [], audit: [], ignored: [], techChat: {},
@@ -358,6 +370,77 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Produksjon: data og handlinger går mot serveren ───────────────────────
+  const refresh = useCallback(async () => {
+    if (DEMO) return;
+    try {
+      const [s, mail] = await Promise.all([api<any>('/api/state'), api<MailStatus>('/api/mail/status')]);
+      update((st) => ({ ...st, cases: s.cases, messages: s.messages, drafts: s.drafts, activities: [...s.activities].reverse(), ignored: s.ignored, mail, loaded: true }));
+    } catch { update((st) => ({ ...st, loaded: true })); }
+  }, [update]);
+
+  useEffect(() => {
+    if (DEMO) return;
+    void refresh();
+    const t = setInterval(() => { if (document.visibilityState === 'visible') void refresh(); }, 15_000);
+    const onVis = () => { if (document.visibilityState === 'visible') void refresh(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis); };
+  }, [refresh]);
+
+  const call = useCallback(async (path: string, body?: unknown, okText?: string, method?: string) => {
+    try { await api(path, { body: body ?? {}, method }); if (okText) toast(okText, 'success'); return true; }
+    catch (e) { toast(e instanceof Error ? e.message : 'Noe gikk galt.', 'danger'); return false; }
+    finally { await refresh(); }
+  }, [refresh, toast]);
+
+  const withAgent = useCallback(async (agent: AgentId, text: string, caseId: string, fn: () => Promise<unknown>) => {
+    setBusy(agent, { status: 'working', text, caseId });
+    try { await fn(); } finally { update((s) => ({ ...s, busy: { ...s.busy, [agent]: undefined } })); }
+  }, [setBusy, update]);
+
+  const remoteActions = DEMO ? null : {
+    approveAndSend: async (draftId: string, edited?: { subject: string; body: string }) => {
+      if (ref.current.sending[draftId]) return;
+      update((s) => ({ ...s, sending: { ...s.sending, [draftId]: true } }));
+      const ok = await call(`/api/drafts/${draftId}/send`, edited ?? {}, 'Sendt. Bekreftet av Microsoft.');
+      update((s) => ({ ...s, sending: { ...s.sending, [draftId]: false } }));
+      return ok;
+    },
+    rejectDraft: (draftId: string, reason: string) => { void call(`/api/drafts/${draftId}/reject`, { reason }); },
+    regenerate: async (draftId: string, feedback: string) => {
+      const d = ref.current.drafts.find((x) => x.id === draftId);
+      await withAgent(d?.author === 'followup' ? 'followup' : 'quote', 'Lager nytt forslag …', d?.caseId ?? '', () => call(`/api/drafts/${draftId}/regenerate`, { feedback }));
+    },
+    requestDraft: (caseId: string, kind?: DraftKind) =>
+      withAgent(kind === 'follow_up' ? 'followup' : 'quote', 'Lager utkast …', caseId, () => call(`/api/cases/${caseId}/draft`, { kind })),
+    sendManual: async (caseId: string, subject: string, body: string) => { await call(`/api/cases/${caseId}/manual`, { subject, body }, 'Sendt. Bekreftet av Microsoft.'); },
+    moveCase: (caseId: string, status: CaseStatus) => { patchCase(caseId, { status }); void call(`/api/cases/${caseId}`, { status }); },
+    setPriority: (caseId: string, priority: Priority) => { patchCase(caseId, { priority }); void call(`/api/cases/${caseId}`, { priority }); },
+    markRead: (caseId: string) => { patchCase(caseId, { unreadCustomerReply: false }); void call(`/api/cases/${caseId}`, { unread: false }); },
+    resolveFlag: (caseId: string) => { patchCase(caseId, { flagged: undefined }); void call(`/api/cases/${caseId}`, { flagged: null }); },
+    exportCase: (caseId: string) => {
+      const s = ref.current;
+      const c = getCase(caseId);
+      void api(`/api/cases/${caseId}/export`).catch(() => {}); // logges i revisjonsloggen på serveren
+      return JSON.stringify({ case: c, messages: s.messages.filter((m) => m.threadId === c.threadId), drafts: s.drafts.filter((d) => d.caseId === caseId) }, null, 2);
+    },
+    deleteCaseData: (caseId: string) => {
+      const c = getCase(caseId);
+      update((s) => ({ ...s, cases: s.cases.filter((x) => x.id !== caseId) }));
+      void call(`/api/cases/${caseId}`, undefined, `Kundedata for ${c.number} er slettet.`, 'DELETE');
+    },
+    // E-posttilkobling
+    connectMail: async () => {
+      try { const r = await api<{ url: string }>('/api/mail/connect', { body: {} }); window.location.assign(r.url); }
+      catch (e) { toast(e instanceof Error ? e.message : 'Kunne ikke starte tilkoblingen.', 'danger'); }
+    },
+    disconnectMail: () => call('/api/mail/disconnect', {}, 'E-post er koblet fra.'),
+    setSending: (enabled: boolean) => call('/api/mail/settings', { sending_enabled: enabled }, enabled ? 'Sending er slått på.' : 'Skyggemodus er slått på.'),
+    syncNow: () => call('/api/mail/sync-now', {}, 'Synkronisert.'),
+    refresh,
+  };
+
   const agents: AgentView[] = useMemo(() => {
     const pending = state.drafts.filter((d) => d.state === 'pending');
     const followUps = state.cases.filter((c) => c.status === 'follow_up').length;
@@ -398,7 +481,11 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
 
   return {
     state, tenant, agents,
-    actions: { ...jobs, approveAndSend, rejectDraft, regenerate, requestDraft, sendManual, moveCase, setPriority, markRead, resolveFlag, simulateInbound, simulateCustomerReply, exportCase, deleteCaseData, setRole, failNextSend, reset, toast },
+    actions: {
+      ...jobs, approveAndSend, rejectDraft, regenerate, requestDraft, sendManual, moveCase, setPriority, markRead, resolveFlag, simulateInbound, simulateCustomerReply, exportCase, deleteCaseData, setRole, failNextSend, reset, toast,
+      connectMail: async () => {}, disconnectMail: async () => true, setSending: async (_: boolean) => true, syncNow: async () => true, refresh,
+      ...remoteActions,
+    },
   };
 }
 

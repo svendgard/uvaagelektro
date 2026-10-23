@@ -15,7 +15,7 @@ import { decryptSecret, encryptSecret, newRecoveryCodes, newTotpSecret, normaliz
  *
  * Sikkerhet:
  *   - Passord: scrypt (N=2^15). Minst 12 tegn.
- *   - Sesjon: tilfeldig token i httpOnly + Secure + SameSite=Strict-cookie. Bare SHA-256 lagres.
+ *   - Sesjon: tilfeldig token i httpOnly + Secure + SameSite=Lax-cookie (Lax trengs for retur fra Microsoft-innlogging; CSRF stoppes av header- og Origin-sjekk). Bare SHA-256 lagres.
  *     Utløper etter 7 dager, eller 24 timer uten aktivitet.
  *   - CSRF: alle endrende kall krever headeren X-Requested-With og riktig Origin.
  *   - Brute force: 5 feil per e-post eller 30 per IP-adresse på 15 minutter gir midlertidig sperre.
@@ -39,6 +39,19 @@ export interface AppOptions {
   /** 32 byte base64. Uten nøkkel kan tofaktor ikke settes opp. */
   mfaKey?: string;
   issuer?: string;
+  /** Status for integrasjoner i Admin. */
+  integrations?: () => Promise<Record<string, string>>;
+  /** Flere ruter (f.eks. e-post) som registreres før 404-ruten. */
+  extensions?: ((app: Hono<Env>, h: Helpers) => void)[];
+}
+
+export interface Helpers {
+  requireUser: (c: Context<Env>, next: Next) => Promise<Response | void>;
+  requireSuperadmin: (c: Context<Env>, next: Next) => Promise<Response | void>;
+  audit: (actor: { id?: string; email: string }, action: string, detail?: string) => Promise<unknown>;
+  err: (c: Context, status: 400 | 401 | 403 | 404 | 409 | 429, message: string) => Response;
+  body: (c: Context) => Promise<Record<string, unknown>>;
+  now: () => number;
 }
 
 const SESSION_TTL_MS = 7 * 24 * 3600e3;
@@ -50,7 +63,7 @@ const MAX_FAILS_IP = 30;
 const MFA_CHALLENGE_TTL_MS = 5 * 60e3;
 const MFA_MAX_ATTEMPTS = 5;
 
-type Env = { Variables: { user: User & { mfa_enabled: boolean }; sessionHash: string; mfaSetupRequired: boolean } };
+export type Env = { Variables: { user: User & { mfa_enabled: boolean }; sessionHash: string; mfaSetupRequired: boolean } };
 
 export function createApp(o: AppOptions) {
   const { db } = o;
@@ -121,7 +134,7 @@ export function createApp(o: AppOptions) {
     await db.query('INSERT INTO sessions(token_hash, user_id, created_at, expires_at, last_seen_at, ip, user_agent) VALUES ($1,$2,$3,$4,$3,$5,$6)',
       [sha256(token), userId, new Date(t), new Date(t + SESSION_TTL_MS), ip(c), (c.req.header('user-agent') ?? '').slice(0, 200)]);
     await db.query('UPDATE users SET last_login_at = $2 WHERE id = $1', [userId, new Date(t)]);
-    setCookie(c, cookieName, token, { path: '/', httpOnly: true, secure: o.secureCookies, sameSite: 'Strict', maxAge: SESSION_TTL_MS / 1000 });
+    setCookie(c, cookieName, token, { path: '/', httpOnly: true, secure: o.secureCookies, sameSite: 'Lax', maxAge: SESSION_TTL_MS / 1000 });
   }
 
   const requireUser = async (c: Context<Env>, next: Next) => {
@@ -392,9 +405,13 @@ export function createApp(o: AppOptions) {
       version: o.version ?? 'lokal', started_at: new Date(startedAt).toISOString(), server_time: new Date(now()).toISOString(),
       database: dbOk ? 'ok' : 'feil', ...counts,
       mfa: { required_roles: o.mfaRequiredRoles ?? [], configured: !!o.mfaKey },
-      integrations: { microsoft365: 'ikke koblet til', ai: 'ikke koblet til', health_reporting: process.env.AGENT_DASHBOARD_URL ? 'konfigurert' : 'ikke konfigurert' },
+      integrations: o.integrations ? await o.integrations().catch(() => ({ microsoft365: 'ukjent', ai: 'ukjent', health_reporting: 'ukjent' }))
+        : { microsoft365: 'ikke koblet til', ai: 'ikke koblet til', health_reporting: process.env.AGENT_DASHBOARD_URL ? 'konfigurert' : 'ikke konfigurert' },
     });
   });
+
+  const helpers: Helpers = { requireUser: requireUser as Helpers['requireUser'], requireSuperadmin: requireSuperadmin as Helpers['requireSuperadmin'], audit, err, body, now };
+  for (const ext of o.extensions ?? []) ext(app, helpers);
 
   app.all('/api/*', (c) => err(c, 404, 'Ukjent endepunkt.'));
 

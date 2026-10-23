@@ -96,7 +96,7 @@ Produksjonsversjonen (`server/`) krever innlogging. Ingen data vises uten gyldig
 - Roller: **eier** (Espen) bruker Agentkontoret. **Superadministrator** (Tech Haus) ser alt og har Admin-fanen, men kan ikke sende e-post til kunder.
 - Brukere opprettes av superadministrator med en engangslenke (gyldig 72 t). Personen velger passord selv (minst 12 tegn, scrypt).
 - Første superadministrator opprettes ved oppstart fra `BOOTSTRAP_SUPERADMIN_EMAIL`. Engangslenken skrives til loggen i Render.
-- Sesjon i httpOnly/Secure/SameSite=Strict-cookie. Utløper etter 7 dager, eller 24 t uten aktivitet.
+- Sesjon i httpOnly/Secure/SameSite=Lax-cookie. Utløper etter 7 dager, eller 24 t uten aktivitet.
 - 5 feil innlogginger per e-post (30 per IP) på 15 minutter gir midlertidig sperre.
 - CSRF-vern, CSP, HSTS og `noindex` på alle svar. Revisjonslogg og innloggingslogg i Admin.
 - Superadministrator fjernes ved å deaktivere brukeren i Admin.
