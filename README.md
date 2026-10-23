@@ -104,3 +104,7 @@ Produksjonsversjonen (`server/`) krever innlogging. Ingen data vises uten gyldig
 - Hemmeligheten krypteres med `MFA_ENCRYPTION_KEY` (32 byte, base64). Superadministrator kan nullstille tofaktor for andre i Admin.
 
 Miljøvariabler for webtjenesten: `DATABASE_URL`, `NODE_ENV=production`, `TENANT_ID`, `BOOTSTRAP_SUPERADMIN_EMAIL`, `MFA_ENCRYPTION_KEY`, `MFA_REQUIRED_ROLES` (tom til vi skrur det på), valgfritt `APP_URL` (ellers `RENDER_EXTERNAL_URL`).
+
+E-post og AI:
+- `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `TOKEN_ENCRYPTION_KEY` (32 tilfeldige byte, base64). Valgfritt `MICROSOFT_ALLOWED_TENANT_ID`.
+- AI: `OPENAI_API_KEY` eller `ANTHROPIC_API_KEY`. `AI_PROVIDER=openai|anthropic` velger når begge finnes. Modeller kan overstyres med `AI_TRIAGE_MODEL` og `AI_DRAFT_MODEL` (standard OpenAI: `gpt-6-luna` / `gpt-6.1-sol`; Claude: `claude-haiku-5-5` / `claude-sonnet-5-5`). Uten nøkkel brukes enkle regler.

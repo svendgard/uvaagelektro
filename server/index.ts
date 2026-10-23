@@ -4,6 +4,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { pgDb, migrate } from './db';
 import { createApp, bootstrapSuperadmin } from './app';
 import { createMail } from './mail';
+import type { AiConfig, AiProvider } from './ai';
 import { uvaagElektro } from '../src/config/tenant';
 import { healthReporterFromEnv } from './health/healthReporter';
 
@@ -22,6 +23,13 @@ if (mfaRequiredRoles.length && !env.MFA_ENCRYPTION_KEY) { log('error', 'MFA_REQU
 const tenant = uvaagElektro;
 const msReady = !!(env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.TOKEN_ENCRYPTION_KEY);
 let health: ReturnType<typeof healthReporterFromEnv> = null;
+// AI-leverandør: AI_PROVIDER=openai|anthropic. Uten den velges den leverandøren det finnes nøkkel for.
+const provider: AiProvider = env.AI_PROVIDER === 'openai' || env.AI_PROVIDER === 'anthropic' ? env.AI_PROVIDER
+  : env.OPENAI_API_KEY && !env.ANTHROPIC_API_KEY ? 'openai' : 'anthropic';
+const aiConfig: AiConfig = provider === 'openai'
+  ? { provider, apiKey: env.OPENAI_API_KEY, triageModel: env.AI_TRIAGE_MODEL || 'gpt-6-luna', draftModel: env.AI_DRAFT_MODEL || 'gpt-6.1-sol' }
+  : { provider, apiKey: env.ANTHROPIC_API_KEY, triageModel: env.AI_TRIAGE_MODEL || env.ANTHROPIC_TRIAGE_MODEL || 'claude-haiku-5-5', draftModel: env.AI_DRAFT_MODEL || env.ANTHROPIC_DRAFT_MODEL || 'claude-sonnet-5-5' };
+
 const mail = createMail({
   db, tenant, tenantId,
   ms: msReady ? {
@@ -30,7 +38,7 @@ const mail = createMail({
     redirectUri: `${appUrl.replace(/\/$/, '')}/api/microsoft/callback`,
   } : undefined,
   tokenKey: env.TOKEN_ENCRYPTION_KEY,
-  ai: { apiKey: env.ANTHROPIC_API_KEY, triageModel: env.ANTHROPIC_TRIAGE_MODEL || 'claude-haiku-5-5', draftModel: env.ANTHROPIC_DRAFT_MODEL || 'claude-sonnet-5-5' },
+  ai: aiConfig,
   initialSyncDays: Number(env.INITIAL_SYNC_DAYS || 3),
   onDelivered: () => health?.notifyDelivered(tenant.monitoring.mailSyncAgentId),
 });
@@ -42,13 +50,14 @@ const { app, createInvite } = createApp({
     const st = await mail.status();
     return {
       microsoft365: !st.configured ? 'ikke konfigurert' : st.connected ? `tilkoblet (${st.mailbox}${st.sending_enabled ? ', sending på' : ', skyggemodus'})` : st.status === 'reconnect_required' ? 'må kobles til på nytt' : 'ikke koblet til',
-      ai: env.ANTHROPIC_API_KEY ? 'konfigurert' : 'ikke konfigurert (enkle regler brukes)',
+      ai: aiConfig.apiKey ? `${aiConfig.provider === 'openai' ? 'OpenAI' : 'Claude'} (${aiConfig.triageModel} / ${aiConfig.draftModel})` : 'ikke konfigurert (enkle regler brukes)',
       health_reporting: env.AGENT_DASHBOARD_URL ? 'konfigurert' : 'ikke konfigurert',
     };
   },
 });
 if (!msReady) log('warn', 'Microsoft-tilkobling er ikke konfigurert (MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, TOKEN_ENCRYPTION_KEY)');
-if (!env.ANTHROPIC_API_KEY) log('warn', 'ANTHROPIC_API_KEY mangler. Agentene bruker enkle regler.');
+if (!aiConfig.apiKey) log('warn', 'AI-nøkkel mangler (OPENAI_API_KEY eller ANTHROPIC_API_KEY). Agentene bruker enkle regler.');
+else log('info', 'AI konfigurert', { provider: aiConfig.provider, triage_model: aiConfig.triageModel, draft_model: aiConfig.draftModel });
 
 // Bakgrunnsjobb: synkroniser e-post hvert minutt. Én instans (Render starter), lås i minnet.
 health = healthReporterFromEnv([{ agentId: tenant.monitoring.mailSyncAgentId, latestDeliveredScan: () => mail.latestDeliveredRun() }]);
