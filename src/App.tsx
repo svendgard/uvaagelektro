@@ -10,13 +10,13 @@ import { ProjectsView } from './components/Projects';
 import { TechView } from './components/TechView';
 import { cx } from './lib/util';
 import { DEMO } from './demo';
-import { AuthGate } from './components/Auth';
+import { AccountSecurity, AuthGate } from './components/Auth';
 import { AdminView } from './components/Admin';
 import type { SessionUser } from './lib/api';
 
 type View = 'office' | 'cases' | 'projects' | 'tech' | 'inbox' | 'log' | 'settings' | 'admin';
 
-function Shell({ me, logout }: { me?: SessionUser; logout?: () => Promise<void> }) {
+function Shell({ me, logout, refresh }: { me?: SessionUser; logout?: () => Promise<void>; refresh?: () => void }) {
   const { state, tenant } = useStore();
   const [view, setView] = useState<View>('office');
   const [caseId, setCaseId] = useState<string | null>(null);
@@ -93,7 +93,7 @@ function Shell({ me, logout }: { me?: SessionUser; logout?: () => Promise<void> 
         {view === 'tech' && <TechView />}
         {view === 'inbox' && <InboxView openCase={setCaseId} />}
         {view === 'log' && <LogView openCase={setCaseId} />}
-        {view === 'settings' && <SettingsView />}
+        {view === 'settings' && <div className="flex flex-col gap-5">{me && <AccountSecurity me={me} onChanged={() => refresh?.()} />}<SettingsView /></div>}
         {view === 'admin' && me?.role === 'superadmin' && <AdminView me={me} />}
       </main>
 
@@ -114,10 +114,10 @@ export default function App() {
   if (DEMO) return <StoreProvider><Shell /></StoreProvider>;
   return (
     <AuthGate>
-      {(me, logout) => (
+      {(me, logout, refresh) => (
         // Superadministrator kan se alt, men bare eieren kan godkjenne og sende til kunder.
         <StoreProvider key={me.id} role={me.role === 'owner' ? 'owner' : 'viewer'}>
-          <Shell me={me} logout={logout} />
+          <Shell me={me} logout={logout} refresh={refresh} />
         </StoreProvider>
       )}
     </AuthGate>

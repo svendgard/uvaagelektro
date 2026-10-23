@@ -10,7 +10,7 @@
     "build:demo": "DEMO=true ARTIFACT=true vite build",
     "start": "tsx server/index.ts",
     "typecheck": "tsc && tsc -p tsconfig.server.json",
-    "test": "tsx tests/auth.mts && tsx tests/health.mts && tsx tests/smoke.mts && tsx tests/projects.mts"
+    "test": "tsx tests/auth.mts && tsx tests/mfa.mts && tsx tests/health.mts && tsx tests/smoke.mts && tsx tests/projects.mts"
   },
   "keywords": [],
   "author": "",
@@ -19,15 +19,17 @@
     "@hono/node-server": "^1.13.7",
     "hono": "^4.6.14",
     "pg": "^8.13.1",
+    "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tsx": "^4.19.2"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.2.15",
+    "@electric-sql/pglite": "^0.3.4",
     "@types/luxon": "^3.4.2",
     "@types/node": "^20.17.6",
     "@types/pg": "^8.11.10",
+    "@types/qrcode": "^1.5.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",

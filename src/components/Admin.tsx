@@ -3,8 +3,8 @@ import { api, type SessionUser } from '../lib/api';
 import { Icon } from './ui';
 import { cx, fmtDateTime } from '../lib/util';
 
-interface AdminUser { id: string; email: string; name: string; role: 'superadmin' | 'owner'; active: boolean; created_at: string; last_login_at: string | null; has_password: boolean; pending_invite: boolean; sessions: number }
-interface Status { version: string; started_at: string; server_time: string; database: string; users: number; sessions: number; integrations: Record<string, string> }
+interface AdminUser { id: string; email: string; name: string; role: 'superadmin' | 'owner'; active: boolean; created_at: string; last_login_at: string | null; has_password: boolean; pending_invite: boolean; sessions: number; mfa_enabled: boolean }
+interface Status { version: string; started_at: string; server_time: string; database: string; users: number; sessions: number; mfa: { required_roles: string[]; configured: boolean }; integrations: Record<string, string> }
 
 const ROLE = { superadmin: 'Superadministrator', owner: 'Eier' };
 
@@ -68,6 +68,7 @@ export function AdminView({ me }: { me: SessionUser }) {
               <li>Microsoft 365: {status.integrations.microsoft365}</li>
               <li>AI: {status.integrations.ai}</li>
               <li>Helserapportering: {status.integrations.health_reporting}</li>
+              <li>Tofaktor påkrevd for: {status.mfa.required_roles.length ? status.mfa.required_roles.map((r) => (r === 'owner' ? 'eier' : 'superadmin')).join(', ') : 'ingen (valgfritt)'}{!status.mfa.configured && ' · nøkkel mangler'}</li>
             </ul>
           </div>
         </section>
@@ -76,8 +77,8 @@ export function AdminView({ me }: { me: SessionUser }) {
       <section className="card p-4">
         <h2 className="mb-3 font-display text-base font-semibold">Brukere</h2>
         <div className="scroll-x">
-          <table className="w-full min-w-[640px] text-left text-[13px]">
-            <thead className="border-b border-line text-xs text-muted"><tr><th className="py-2 pr-2 font-semibold">Bruker</th><th className="px-2 py-2 font-semibold">Rolle</th><th className="px-2 py-2 font-semibold">Status</th><th className="px-2 py-2 font-semibold">Sist innlogget</th><th className="py-2 pl-2 text-right font-semibold">Handlinger</th></tr></thead>
+          <table className="w-full min-w-[720px] text-left text-[13px]">
+            <thead className="border-b border-line text-xs text-muted"><tr><th className="py-2 pr-2 font-semibold">Bruker</th><th className="px-2 py-2 font-semibold">Rolle</th><th className="px-2 py-2 font-semibold">Status</th><th className="px-2 py-2 font-semibold">Tofaktor</th><th className="px-2 py-2 font-semibold">Sist innlogget</th><th className="py-2 pl-2 text-right font-semibold">Handlinger</th></tr></thead>
             <tbody className="divide-y divide-line">
               {users.map((u) => (
                 <tr key={u.id}>
@@ -88,6 +89,7 @@ export function AdminView({ me }: { me: SessionUser }) {
                       : !u.has_password ? <span className="rounded-full bg-warn-soft px-2 py-0.5 text-xs font-semibold text-warn">{u.pending_invite ? 'Venter på passord' : 'Lenke utløpt'}</span>
                       : <span className="rounded-full bg-ok-soft px-2 py-0.5 text-xs font-semibold text-ok">Aktiv</span>}
                   </td>
+                  <td className="px-2 py-2 text-xs">{u.mfa_enabled ? <span className="font-semibold text-ok">På</span> : <span className="text-muted">Av</span>}</td>
                   <td className="px-2 py-2 text-xs text-muted">{u.last_login_at ? fmtDateTime(u.last_login_at) : 'Aldri'}</td>
                   <td className="py-2 pl-2 text-right">
                     <div className="flex flex-wrap justify-end gap-1.5">
@@ -99,6 +101,9 @@ export function AdminView({ me }: { me: SessionUser }) {
                         </>
                       ) : (
                         <button className="btn btn-ghost !px-2 !py-1 text-xs" onClick={() => setConfirmReset(u.id)}>Ny lenke</button>
+                      )}
+                      {u.mfa_enabled && u.id !== me.id && (
+                        <button className="btn btn-ghost !px-2 !py-1 text-xs" onClick={() => run(async () => { await api(`/api/admin/users/${u.id}/mfa-reset`, { method: 'POST' }); })}>Nullstill tofaktor</button>
                       )}
                       {u.id !== me.id && (
                         <button className={cx('btn !px-2 !py-1 text-xs', u.active ? 'btn-danger' : 'btn-ghost')} onClick={() => run(async () => { await api(`/api/admin/users/${u.id}/active`, { body: { active: !u.active } }); })}>

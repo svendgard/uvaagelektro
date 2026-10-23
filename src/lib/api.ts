@@ -1,4 +1,4 @@
-export interface SessionUser { id: string; email: string; name: string; role: 'superadmin' | 'owner'; tenant_id: string }
+export interface SessionUser { id: string; email: string; name: string; role: 'superadmin' | 'owner'; tenant_id: string; mfa_enabled: boolean; mfa_required: boolean; mfa_setup_required: boolean }
 
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 

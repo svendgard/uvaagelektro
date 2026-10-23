@@ -67,6 +67,27 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 `,
   },
+  {
+    version: 2,
+    sql: `
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled boolean NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret_enc text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_pending_secret_enc text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_last_step bigint;
+CREATE TABLE IF NOT EXISTS mfa_recovery_codes (
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash text NOT NULL,
+  used_at timestamptz,
+  PRIMARY KEY (user_id, code_hash)
+);
+CREATE TABLE IF NOT EXISTS mfa_challenges (
+  token_hash text PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at timestamptz NOT NULL,
+  attempts integer NOT NULL DEFAULT 0
+);
+`,
+  },
 ];
 
 export async function migrate(db: Db): Promise<void> {

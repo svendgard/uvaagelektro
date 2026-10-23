@@ -14,8 +14,11 @@ const tenantId = env.TENANT_ID || 'uvaag-elektro';
 
 const db = pgDb(env.DATABASE_URL);
 await migrate(db);
+const mfaRequiredRoles = (env.MFA_REQUIRED_ROLES ?? '').split(',').map((r) => r.trim()).filter((r): r is 'superadmin' | 'owner' => r === 'superadmin' || r === 'owner');
+if (mfaRequiredRoles.length && !env.MFA_ENCRYPTION_KEY) { log('error', 'MFA_REQUIRED_ROLES er satt, men MFA_ENCRYPTION_KEY mangler'); process.exit(1); }
 const { app, createInvite } = createApp({
   db, appUrl, tenantId, secureCookies: production || appUrl.startsWith('https://'), version: env.RENDER_GIT_COMMIT?.slice(0, 7),
+  mfaRequiredRoles, mfaKey: env.MFA_ENCRYPTION_KEY, issuer: 'Agentkontoret Uvaag Elektro',
 });
 await bootstrapSuperadmin(db, env.BOOTSTRAP_SUPERADMIN_EMAIL, tenantId, createInvite);
 

@@ -4,7 +4,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { migrate, type Db } from '../server/db.ts';
 import { createApp, bootstrapSuperadmin } from '../server/app.ts';
 
-const pg = new PGlite();
+const pg = await PGlite.create();
 const db: Db = { query: (sql, params) => pg.query(sql, params as any[]) as any };
 await migrate(db);
 await migrate(db); // idempotent

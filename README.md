@@ -10,6 +10,7 @@ npm start            # server: innlogging + frontend (krever DATABASE_URL)
 npm run typecheck
 npm test             # alle tester
 npx tsx tests/auth.mts       # innlogging, roller, sperrer, invitasjoner
+npx tsx tests/mfa.mts        # tofaktor
 npx tsx tests/smoke.mts      # røyktest: e-post og godkjenning
 npx tsx tests/projects.mts   # røyktest: oppdrag og prosjektkontroll
 npx tsx tests/health.mts     # helserapportering mot Agent Dashboard
@@ -99,5 +100,7 @@ Produksjonsversjonen (`server/`) krever innlogging. Ingen data vises uten gyldig
 - 5 feil innlogginger per e-post (30 per IP) på 15 minutter gir midlertidig sperre.
 - CSRF-vern, CSP, HSTS og `noindex` på alle svar. Revisjonslogg og innloggingslogg i Admin.
 - Superadministrator fjernes ved å deaktivere brukeren i Admin.
+- Tofaktor (kode fra autentiseringsapp + 10 reservekoder) er bygget inn. Alle kan slå det på under Innstillinger. `MFA_REQUIRED_ROLES` styrer hvem som må: tom = valgfritt, `superadmin` eller `superadmin,owner` = påkrevd. Endringen virker umiddelbart, og brukere uten tofaktor må sette det opp ved neste klikk.
+- Hemmeligheten krypteres med `MFA_ENCRYPTION_KEY` (32 byte, base64). Superadministrator kan nullstille tofaktor for andre i Admin.
 
-Miljøvariabler for webtjenesten: `DATABASE_URL`, `NODE_ENV=production`, `TENANT_ID`, `BOOTSTRAP_SUPERADMIN_EMAIL`, valgfritt `APP_URL` (ellers `RENDER_EXTERNAL_URL`).
+Miljøvariabler for webtjenesten: `DATABASE_URL`, `NODE_ENV=production`, `TENANT_ID`, `BOOTSTRAP_SUPERADMIN_EMAIL`, `MFA_ENCRYPTION_KEY`, `MFA_REQUIRED_ROLES` (tom til vi skrur det på), valgfritt `APP_URL` (ellers `RENDER_EXTERNAL_URL`).
