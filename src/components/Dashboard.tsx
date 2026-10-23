@@ -79,15 +79,15 @@ function AgentCard({ view, onOpen }: { view: AgentView; onOpen: () => void }) {
 
 function ApprovalQueue({ nav }: { nav: Nav }) {
   const { state, tenant } = useStore();
-  const pending = state.drafts.filter((d) => d.state === 'pending' || d.state === 'send_failed');
+  const pending = state.drafts.filter((d) => d.state === 'pending' || d.state === 'send_failed' || d.state === 'approved' || d.state === 'sending');
   const kinds = { reply: 'Svar', info_request: 'Spørsmål til kunde', quote: 'Tilbud', follow_up: 'Oppfølging', extra_work: 'Tilleggsarbeid' } as const;
   return (
     <section className="card p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
-        <h2 className="font-display text-base font-semibold">Til godkjenning</h2>
-        <span className="text-xs text-muted">Ingen e-post sendes uten at {tenant.owner.firstName} godkjenner</span>
+        <h2 className="font-display text-base font-semibold">Til deg</h2>
+        <span className="text-xs text-muted">Ingenting sendes før {tenant.owner.firstName} har godkjent og trykket Send</span>
       </div>
-      {pending.length === 0 ? <Empty text="Alt er godkjent. Agentene sier fra når noe nytt er klart." /> : (
+      {pending.length === 0 ? <Empty text="Ingenting venter på deg. Agentene sier fra når noe nytt er klart." /> : (
         <ul className="flex flex-col divide-y divide-line">
           {pending.map((d) => {
             const c = state.cases.find((x) => x.id === d.caseId);
@@ -102,11 +102,12 @@ function ApprovalQueue({ nav }: { nav: Nav }) {
                       <span className="truncate font-semibold">{c.customer.name}</span>
                       <span className="text-xs text-muted">{kinds[d.kind]} fra {ag?.name ?? 'Espen'}</span>
                       {c.flagged && <span className="inline-flex items-center gap-1 rounded-full bg-bad-soft px-1.5 text-[11px] font-bold text-bad"><Icon name="flag" className="h-3 w-3" />Haster</span>}
-                      {d.state === 'send_failed' && <span className="rounded-full bg-bad-soft px-1.5 text-[11px] font-bold text-bad">Sending feilet</span>}
+                      {(d.state === 'send_failed' || d.error) && <span className="rounded-full bg-bad-soft px-1.5 text-[11px] font-bold text-bad">Sending feilet</span>}
+                      {(d.state === 'approved' || d.state === 'sending') && !d.error && <span className="rounded-full bg-ok-soft px-1.5 text-[11px] font-bold text-ok">Klar for sending</span>}
                     </div>
                     <p className="truncate text-xs text-muted">{c.title} · {fmtRelative(d.createdAt)}</p>
                   </div>
-                  <span className="btn btn-accent hidden sm:inline-flex">Les og godkjenn</span>
+                  <span className="btn btn-accent hidden sm:inline-flex">{d.state === 'approved' || d.state === 'sending' ? 'Send' : 'Les og rediger utkastet'}</span>
                 </button>
               </li>
             );

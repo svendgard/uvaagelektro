@@ -119,7 +119,7 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
     if (s0.role !== 'owner') { toast('Du har ikke tilgang til å sende e-post.', 'danger'); return; }
     if (s0.sending[draftId]) return; // dobbeltklikk-vern i UI
     const draft = s0.drafts.find((d) => d.id === draftId);
-    if (!draft || (draft.state !== 'pending' && draft.state !== 'send_failed')) return;
+    if (!draft || (draft.state !== 'pending' && draft.state !== 'send_failed' && draft.state !== 'approved')) return;
     const kase = getCase(draft.caseId);
     const body = edited?.body ?? draft.body;
     const subject = edited?.subject ?? draft.subject;
@@ -370,6 +370,29 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Godkjenning i to steg (demo-versjon; produksjon overstyrer under) ──────
+  const approveDraft = useCallback(async (draftId: string, edited: { subject: string; body: string; language?: string }) => {
+    const d = ref.current.drafts.find((x) => x.id === draftId);
+    if (!d || d.state !== 'pending') return false;
+    const changed = edited.subject !== d.subject || edited.body !== d.body;
+    update((s) => ({ ...s, drafts: s.drafts.map((x) => x.id === draftId ? { ...x, state: 'approved', original: { subject: x.subject, body: x.body }, subject: edited.subject, body: edited.body, language: edited.language ?? x.language, editedBy: changed ? owner.email : undefined, decidedBy: owner.email, decidedAt: new Date().toISOString() } : x) }));
+    audit('draft.approved', `Godkjente ${changed ? 'redigert ' : ''}utkast v${d.version}`, d.caseId);
+    log('owner', `${owner.firstName} godkjente utkast v${d.version}. Klart for sending.`, d.caseId, 'success');
+    return true;
+  }, [update, audit, log, owner]);
+
+  const saveApproved = useCallback(async (draftId: string, b: { subject: string; body: string; email: string; language?: string }) => {
+    update((s) => ({ ...s, drafts: s.drafts.map((x) => x.id === draftId && x.state === 'approved' ? { ...x, subject: b.subject, body: b.body, recipient: b.email, language: b.language ?? x.language, editedBy: owner.email } : x) }));
+    return true;
+  }, [update, owner.email]);
+
+  const sendApproved = useCallback(async (draftId: string) => { await approveAndSend(draftId); return true; }, [approveAndSend]);
+
+  const translateDraft = useCallback(async (_draftId: string, _language: string, _subject: string, _body: string): Promise<{ subject: string; body: string } | null> => {
+    toast('Oversettelse krever at AI er koblet til (ikke i demo).', 'neutral');
+    return null;
+  }, [toast]);
+
   // ── Produksjon: data og handlinger går mot serveren ───────────────────────
   const refresh = useCallback(async () => {
     if (DEMO) return;
@@ -408,13 +431,33 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
       return ok;
     },
     rejectDraft: (draftId: string, reason: string) => { void call(`/api/drafts/${draftId}/reject`, { reason }); },
+    approveDraft: (draftId: string, edited: { subject: string; body: string; language?: string }) =>
+      call(`/api/drafts/${draftId}/approve`, edited, 'Godkjent. Ligger klar for sending.'),
+    saveApproved: (draftId: string, b: { subject: string; body: string; email: string; language?: string }) =>
+      call(`/api/drafts/${draftId}/text`, b, 'Endringene er lagret.', 'PUT'),
+    sendApproved: async (draftId: string) => {
+      if (ref.current.sending[draftId]) return false;
+      update((s) => ({ ...s, sending: { ...s.sending, [draftId]: true } }));
+      const ok = await call(`/api/drafts/${draftId}/send`, {}, 'Sendt. Bekreftet av Microsoft.');
+      update((s) => ({ ...s, sending: { ...s.sending, [draftId]: false } }));
+      return ok;
+    },
+    translateDraft: async (draftId: string, language: string, subject: string, body: string) => {
+      try { return await api<{ subject: string; body: string }>(`/api/drafts/${draftId}/translate`, { body: { language, subject, body } }); }
+      catch (e) { toast(e instanceof Error ? e.message : 'Oversettelsen feilet.', 'danger'); return null; }
+    },
     regenerate: async (draftId: string, feedback: string) => {
       const d = ref.current.drafts.find((x) => x.id === draftId);
-      await withAgent(d?.author === 'followup' ? 'followup' : 'quote', 'Lager nytt forslag …', d?.caseId ?? '', () => call(`/api/drafts/${draftId}/regenerate`, { feedback }));
+      await withAgent(d?.author === 'followup' ? 'followup' : 'quote', 'Skriver utkastet på nytt …', d?.caseId ?? '', () => call(`/api/drafts/${draftId}/rewrite`, { feedback }, 'Nytt forslag er klart.'));
     },
     requestDraft: (caseId: string, kind?: DraftKind) =>
       withAgent(kind === 'follow_up' ? 'followup' : 'quote', 'Lager utkast …', caseId, () => call(`/api/cases/${caseId}/draft`, { kind })),
-    sendManual: async (caseId: string, subject: string, body: string) => { await call(`/api/cases/${caseId}/manual`, { subject, body }, 'Sendt. Bekreftet av Microsoft.'); },
+    sendManual: async (caseId: string, subject: string, body: string) => {
+      try {
+        const r = await api<{ id: string }>(`/api/cases/${caseId}/manual`, { body: { subject, body } });
+        await call(`/api/drafts/${r.id}/send`, {}, 'Sendt. Bekreftet av Microsoft.');
+      } catch (e) { toast(e instanceof Error ? e.message : 'Noe gikk galt.', 'danger'); await refresh(); }
+    },
     moveCase: (caseId: string, status: CaseStatus) => { patchCase(caseId, { status }); void call(`/api/cases/${caseId}`, { status }); },
     setPriority: (caseId: string, priority: Priority) => { patchCase(caseId, { priority }); void call(`/api/cases/${caseId}`, { priority }); },
     markRead: (caseId: string) => { patchCase(caseId, { unreadCustomerReply: false }); void call(`/api/cases/${caseId}`, { unread: false }); },
@@ -482,7 +525,7 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
   return {
     state, tenant, agents,
     actions: {
-      ...jobs, approveAndSend, rejectDraft, regenerate, requestDraft, sendManual, moveCase, setPriority, markRead, resolveFlag, simulateInbound, simulateCustomerReply, exportCase, deleteCaseData, setRole, failNextSend, reset, toast,
+      ...jobs, approveAndSend, approveDraft, saveApproved, sendApproved, translateDraft, rejectDraft, regenerate, requestDraft, sendManual, moveCase, setPriority, markRead, resolveFlag, simulateInbound, simulateCustomerReply, exportCase, deleteCaseData, setRole, failNextSend, reset, toast,
       connectMail: async () => {}, disconnectMail: async () => true, setSending: async (_: boolean) => true, syncNow: async () => true, refresh,
       ...remoteActions,
     },

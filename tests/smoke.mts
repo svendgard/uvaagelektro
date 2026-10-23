@@ -19,8 +19,11 @@ console.log('dashboard ok:', txt().includes('Agentkontoret'), txt().includes('AI
 const click = (label: string) => { const b = [...document.querySelectorAll('button')].find(x => x.textContent?.includes(label)) as HTMLButtonElement; if (!b) throw new Error('no button '+label); b.click(); };
 // open a case with pending draft
 click('Kari Nordvik'); await wait(300);
-console.log('detail open:', txt().includes('AI-forslag'), txt().includes('Godkjenn og send'));
-click('Godkjenn og send'); await wait(1600);
+console.log('detail open:', txt().includes('AI-forslag'), txt().includes('Godkjenn'));
+click('Godkjenn'); await wait(300);
+console.log('i send-kø:', txt().includes('Klar for sending') || txt().includes('ikke sendt'));
+[...document.querySelectorAll('button')].find((x) => x.textContent?.trim() === 'Send')!.click(); await wait(100);
+click('Bekreft: send til'); await wait(1600);
 console.log('sent confirmed:', txt().includes('Bekreftet sendt'));
 click('Simuler kundesvar'); await wait(5000);
 console.log('reply+quote draft:', txt().includes('tilbudsutkast'), txt().includes('kr 14'));

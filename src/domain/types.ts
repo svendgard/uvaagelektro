@@ -84,9 +84,28 @@ export interface Draft {
   priceLines?: { label: string; amount: number; source: string }[];
   createdAt: string;
   version: number;
-  state: 'pending' | 'approved' | 'rejected' | 'superseded' | 'sent' | 'send_failed';
+  /** pending = forslag · approved = godkjent, ligger i Send-køen · sending = sendes nå · sent = sendt. */
+  state: 'pending' | 'approved' | 'sending' | 'rejected' | 'superseded' | 'sent' | 'send_failed';
   /** Idempotensnøkkel som hindrer dobbeltsending. */
   idempotencyKey: string;
+  /** Språk: no, en, sv, da. */
+  language?: string;
+  /** Mottaker. Kan endres til utkastet er sendt. */
+  recipient?: string;
+  /** Agentens opprinnelige tekst, tatt vare på ved godkjenning. */
+  original?: { subject: string; body: string };
+  editedBy?: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  sentAt?: string;
+  sentBy?: string;
+  sentTo?: string;
+  /** Siste sendefeil. Ingenting ble sendt. */
+  error?: string;
+  /** Erstattet via «Skriv på nytt». */
+  rewritten?: boolean;
+  /** Beskjeden som ble gitt ved «Skriv på nytt». */
+  feedback?: string;
 }
 
 export interface Customer {

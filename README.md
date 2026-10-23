@@ -108,3 +108,17 @@ Miljøvariabler for webtjenesten: `DATABASE_URL`, `NODE_ENV=production`, `TENANT
 E-post og AI:
 - `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `TOKEN_ENCRYPTION_KEY` (32 tilfeldige byte, base64). Valgfritt `MICROSOFT_ALLOWED_TENANT_ID`.
 - AI: `OPENAI_API_KEY` eller `ANTHROPIC_API_KEY`. `AI_PROVIDER=openai|anthropic` velger når begge finnes. Modeller kan overstyres med `AI_TRIAGE_MODEL` og `AI_DRAFT_MODEL` (standard OpenAI: `gpt-6-luna` / `gpt-6.1-sol`; Claude: `claude-haiku-5-5` / `claude-sonnet-5-5`). Uten nøkkel brukes enkle regler.
+
+
+## Godkjenning og sending av e-post
+
+Agenten sender aldri noe selv. Flyten for hvert utkast:
+
+1. **Forslag** (`pending`): agenten lager et utkast med skrivestilen i `writingBrief` (kundeoppsettet). Eieren kan redigere selv, skrive på nytt med AI (valgfri beskjed, forrige utkast følger med som kontekst) eller oversette (Norsk/Engelsk/Svensk/Dansk; oversettelsen lagres ikke før godkjenning).
+2. **Godkjenn** (`approved`): versjonen i feltene lagres. Agentens original tas vare på (`original_subject`, `original_body`) sammen med `edited_by`. To samtidige godkjenninger gir 200 og 409.
+3. **Send-kø**: tekst og mottaker kan endres til utkastet er sendt (`PUT /api/drafts/:id/text`).
+4. **Send**: krever to klikk i appen («Send» → «Bekreft: send til …»). Serveren reserverer utkastet atomisk (`sending_at`), så det aldri sendes to ganger. Ved feil fjernes reservasjonen. Alternativer: «Åpne i e-post» og «Kopier tekst».
+
+Sending er på fra tilkoblingen (`mail.sendingOnConnect`). Superadministrator kan slå den av (skyggemodus) under Innstillinger.
+
+Endepunkter: `POST /api/drafts/:id/approve`, `PUT /api/drafts/:id/text`, `POST /api/drafts/:id/send`, `POST /api/drafts/:id/reject`, `POST /api/drafts/:id/rewrite`, `POST /api/drafts/:id/translate`, `POST /api/cases/:id/manual` (eierens egen melding legges i Send-køen).

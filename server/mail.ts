@@ -6,13 +6,14 @@ import type { TenantConfig } from '../src/config/tenant';
 import { decryptSecret, encryptSecret } from './auth/totp';
 import { newToken, sha256 } from './auth/crypto';
 import { Graph, MsAuthError, addr, authorizeUrl, exchangeCode, idTokenClaims, pkce, refreshTokens, type Fetch, type GraphMessage, type MsConfig } from './microsoft';
-import { draftReply, triage, type AiConfig, type InMail } from './ai';
+import { draftReply, translate, triage, LANGS, type AiConfig, type InMail, type Lang } from './ai';
 
 /**
  * E-post for Agentkontoret: tilkobling til Microsoft 365, synkronisering, saker, utkast og sending.
  *
- * Skyggemodus (standard): agentene leser og lager utkast, men ingenting sendes fra Agentkontoret.
- * Sending slås på av superadministrator (mail_connections.sending_enabled).
+ * Flyt for utkast: agenten lager forslag (pending) → et menneske redigerer og trykker «Godkjenn» (approved, Send-kø)
+ * → et menneske trykker «Send» og bekrefter (sending → sent). Agenten sender aldri noe selv.
+ * Sending kan slås av for hele kunden (skyggemodus, mail_connections.sending_enabled). Standard styres av tenant.mail.sendingOnConnect.
  */
 
 export interface MailDeps {
@@ -70,6 +71,7 @@ export function createMail(d: MailDeps) {
     }
   }
   const graph = () => new Graph(accessToken, f);
+  const sendOnConnect = tenant.mail.sendingOnConnect !== false;
 
   async function nextNumber(): Promise<string> {
     const year = new Date(now()).getFullYear();
@@ -84,25 +86,27 @@ export function createMail(d: MailDeps) {
   }
 
   /** AIOliver lager et utkast og legger saken til godkjenning. */
-  async function createDraft(caseId: string, opts: { kind?: 'reply' | 'info_request' | 'follow_up' | 'quote'; feedback?: string } = {}) {
+  async function createDraft(caseId: string, opts: { kind?: 'reply' | 'info_request' | 'follow_up' | 'quote'; feedback?: string; previous?: { subject: string; body: string } } = {}) {
     const c = (await db.query<any>('SELECT * FROM cases WHERE id = $1 AND tenant_id = $2', [caseId, tenantId])).rows[0];
     if (!c) throw new Error('Fant ikke saken');
     const missing: string[] = c.missing_info ?? [];
     const kind = opts.kind ?? (missing.length ? 'info_request' : 'reply');
-    const out = await draftReply(d.ai, tenant, { kind, customerName: c.customer.name, summary: c.summary, missing, urgent: c.priority === 'urgent', thread: await threadFor(caseId), feedback: opts.feedback });
+    const out = await draftReply(d.ai, tenant, { kind, customerName: c.customer.name, summary: c.summary, missing, urgent: c.priority === 'urgent', thread: await threadFor(caseId), feedback: opts.feedback, previous: opts.previous });
     const prev = (await db.query<{ v: number }>('SELECT COALESCE(max(version),0)::int AS v FROM drafts WHERE case_id = $1', [caseId])).rows[0].v;
-    await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND state IN ('pending','send_failed')`, [caseId]);
+    await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND state IN ('pending','approved','send_failed')`, [caseId]);
     const lastIn = (await db.query<{ graph_id: string }>(`SELECT graph_id FROM mail_messages WHERE case_id = $1 AND direction = 'inbound' AND graph_id IS NOT NULL ORDER BY sent_at DESC LIMIT 1`, [caseId])).rows[0];
     const author = kind === 'follow_up' ? 'followup' : 'quote';
     const judgement = [...out.requires_human_judgement];
     if (c.flagged?.reason) judgement.unshift(`Saken er flagget: ${c.flagged.reason}`);
     if (out.engine === 'regler') judgement.push('AI er ikke koblet til ennå. Utkastet er laget med enkle regler.');
-    await db.query(`INSERT INTO drafts(id, tenant_id, case_id, kind, author, subject, body, rationale, missing, judgement, version, state, reply_to_graph_id, created_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13)`,
-      [randomUUID(), tenantId, caseId, kind, author, out.subject, out.body, out.rationale, JSON.stringify(out.missing), JSON.stringify(judgement), prev + 1, lastIn?.graph_id ?? null, new Date(now())]);
+    const draftId = randomUUID();
+    await db.query(`INSERT INTO drafts(id, tenant_id, case_id, kind, author, subject, body, rationale, missing, judgement, version, state, reply_to_graph_id, created_at, language, feedback)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13,$14,$15)`,
+      [draftId, tenantId, caseId, kind, author, out.subject, out.body, out.rationale, JSON.stringify(out.missing), JSON.stringify(judgement), prev + 1, lastIn?.graph_id ?? null, new Date(now()), out.language, opts.feedback ?? null]);
     await db.query(`UPDATE cases SET status = 'awaiting_approval', assigned_agent = $2, next_action = $3, updated_at = $4 WHERE id = $1`,
       [caseId, author, `Les og godkjenn utkastet fra ${author === 'followup' ? 'AINora' : 'AIOliver'}.`, new Date(now())]);
-    await activity(author, `${author === 'followup' ? 'AINora' : 'AIOliver'} laget ${kind === 'info_request' ? 'et svarutkast med spørsmål' : kind === 'follow_up' ? 'en oppfølging' : 'et svarutkast'} (v${prev + 1}).`, caseId);
+    await activity(author, `${author === 'followup' ? 'AINora' : 'AIOliver'} ${opts.previous ? 'skrev utkastet på nytt' : `laget ${kind === 'info_request' ? 'et svarutkast med spørsmål' : kind === 'follow_up' ? 'en oppfølging' : 'et svarutkast'}`} (v${prev + 1}).`, caseId);
+    return draftId;
   }
 
   async function attachmentsFor(m: GraphMessage): Promise<{ id: string; filename: string; mimeType: string; sizeKb: number; scan: string; kind: string }[]> {
@@ -199,7 +203,7 @@ export function createMail(d: MailDeps) {
           [c.id, new Date(Date.parse(m.receivedDateTime) - 15 * 60e3)])).rows[0];
         if (ours) { await db.query('UPDATE mail_messages SET graph_id = $2 WHERE id = $1', [ours.id, m.id]); continue; }
         await insertMessage(c.id, m, 'outbound', [], 'owner');
-        const superseded = await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND state IN ('pending','send_failed') RETURNING 1`, [c.id]);
+        const superseded = await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND state IN ('pending','approved','send_failed') AND sending_at IS NULL RETURNING 1`, [c.id]);
         if (['new', 'ai_processing', 'awaiting_approval'].includes(c.status)) {
           await db.query(`UPDATE cases SET status = 'awaiting_customer', assigned_agent = 'followup', next_action = 'Venter på svar fra kunden.', updated_at = $2 WHERE id = $1`, [c.id, new Date(now())]);
         }
@@ -229,39 +233,106 @@ export function createMail(d: MailDeps) {
     return r ? { scan_run_id: `mail-sync-${r.id}`, started_at: r.started_at, completed_at: r.completed_at, persisted_at: r.persisted_at } : null;
   }
 
-  /** Sender et godkjent utkast. Idempotent: samme utkast kan aldri sendes to ganger. */
-  async function sendDraft(draftId: string, user: { id: string; email: string }, edited?: { subject?: string; body?: string }) {
+  type Who = { id: string; email: string };
+  type Result = { ok: true; id?: string } | { ok: false; status: 400 | 404 | 409 | 502; error: string };
+  const EMAIL = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+  const clean = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.slice(0, max) : undefined);
+  const caseLabel = async (caseId: string) => (await db.query<any>('SELECT * FROM cases WHERE id = $1', [caseId])).rows[0];
+
+  /** «Godkjenn»: lagrer versjonen som står i feltene. Agentens original tas vare på. Bare ett av to samtidige klikk vinner. */
+  async function approveDraft(draftId: string, who: Who, edited: { subject?: unknown; body?: unknown; language?: unknown } = {}): Promise<Result> {
+    const subject = clean(edited.subject, 300)?.trim();
+    const body = clean(edited.body, 20000);
+    const language = typeof edited.language === 'string' && edited.language in LANGS ? edited.language : null;
+    const r = (await db.query<any>(`UPDATE drafts SET state = 'approved', decided_by = $3, decided_at = $4,
+        original_subject = subject, original_body = body,
+        subject = COALESCE($5, subject), body = COALESCE($6, body), language = COALESCE($7, language),
+        edited_by = CASE WHEN COALESCE($5, subject) <> subject OR COALESCE($6, body) <> body THEN $3 ELSE NULL END,
+        error = NULL
+      WHERE id = $1 AND tenant_id = $2 AND state = 'pending' RETURNING *`, [draftId, tenantId, who.email, new Date(now()), subject ?? null, body ?? null, language])).rows[0];
+    if (!r) return { ok: false, status: 409, error: 'Utkastet er allerede godkjent, avvist eller erstattet.' };
+    await db.query(`UPDATE cases SET next_action = 'Godkjent. Trykk «Send» for å sende til kunden.', updated_at = $2 WHERE id = $1`, [r.case_id, new Date(now())]);
+    await activity('owner', `${tenant.owner.firstName} godkjente utkast v${r.version}${r.edited_by ? ' (redigert)' : ''}. Klart for sending.`, r.case_id, 'success');
+    return { ok: true };
+  }
+
+  /** Redigerer et godkjent, ikke-sendt utkast (tekst og mottaker). */
+  async function updateApproved(draftId: string, who: Who, b: { subject?: unknown; body?: unknown; email?: unknown; language?: unknown }): Promise<Result> {
+    const email = clean(b.email, 200)?.trim().toLowerCase();
+    if (email && !EMAIL.test(email)) return { ok: false, status: 400, error: 'Ugyldig e-postadresse.' };
+    const language = typeof b.language === 'string' && b.language in LANGS ? b.language : null;
+    const r = (await db.query<any>(`UPDATE drafts SET subject = COALESCE($3, subject), body = COALESCE($4, body), recipient = COALESCE($5, recipient), language = COALESCE($7, language),
+        edited_by = CASE WHEN COALESCE($3, subject) <> subject OR COALESCE($4, body) <> body OR ($5 IS NOT NULL AND $5 IS DISTINCT FROM recipient) THEN $6 ELSE edited_by END
+      WHERE id = $1 AND tenant_id = $2 AND state = 'approved' AND sending_at IS NULL RETURNING *`,
+      [draftId, tenantId, clean(b.subject, 300)?.trim() ?? null, clean(b.body, 20000) ?? null, email ?? null, who.email, language])).rows[0];
+    if (!r) return { ok: false, status: 409, error: 'Utkastet er allerede sendt eller finnes ikke i Send-køen.' };
+    await activity('owner', `${tenant.owner.firstName} redigerte godkjent utkast v${r.version} før sending.`, r.case_id);
+    return { ok: true };
+  }
+
+  /** «Send» (etter bekreftelse). Reserverer utkastet atomisk, så det aldri kan sendes to ganger. */
+  async function sendDraft(draftId: string, who: Who): Promise<Result> {
     const conn = await getConn();
-    if (!conn || conn.status !== 'connected') return { ok: false as const, status: 409 as const, error: 'E-post er ikke koblet til.' };
-    if (!conn.sending_enabled) return { ok: false as const, status: 409 as const, error: 'Sending er av (skyggemodus). Svar fra Outlook inntil sending er slått på.' };
-    const subject = typeof edited?.subject === 'string' && edited.subject.trim() ? edited.subject.trim().slice(0, 300) : undefined;
-    const bodyText = typeof edited?.body === 'string' && edited.body.trim() ? edited.body.slice(0, 20000) : undefined;
-    const claimed = (await db.query<any>(`UPDATE drafts SET state = 'sending', subject = COALESCE($3, subject), body = COALESCE($4, body)
-      WHERE id = $1 AND tenant_id = $2 AND state IN ('pending','send_failed') RETURNING *`, [draftId, tenantId, subject ?? null, bodyText ?? null])).rows[0];
-    if (!claimed) return { ok: false as const, status: 409 as const, error: 'Utkastet er allerede sendt eller lagt bort.' };
-    if (!claimed.reply_to_graph_id) {
-      await db.query(`UPDATE drafts SET state = 'send_failed', error = $2 WHERE id = $1`, [draftId, 'Fant ikke e-posten det skal svares på']);
-      return { ok: false as const, status: 409 as const, error: 'Fant ikke e-posten det skal svares på.' };
+    if (!conn || conn.status !== 'connected') return { ok: false, status: 409, error: 'E-post er ikke koblet til.' };
+    if (!conn.sending_enabled) return { ok: false, status: 409, error: 'Sending er slått av. Kopier teksten og send fra Outlook.' };
+    const claimed = (await db.query<any>(`UPDATE drafts SET state = 'sending', sending_at = $3 WHERE id = $1 AND tenant_id = $2 AND state = 'approved' AND sending_at IS NULL RETURNING *`,
+      [draftId, tenantId, new Date(now())])).rows[0];
+    if (!claimed) {
+      const cur = (await db.query<any>('SELECT state FROM drafts WHERE id = $1 AND tenant_id = $2', [draftId, tenantId])).rows[0];
+      return { ok: false, status: cur ? 409 : 404, error: !cur ? 'Fant ikke utkastet.' : cur.state === 'pending' ? 'Utkastet må godkjennes før det kan sendes.' : cur.state === 'sent' || cur.state === 'sending' ? 'Utkastet er allerede sendt.' : 'Utkastet kan ikke sendes.' };
     }
+    const c = await caseLabel(claimed.case_id);
+    const to = (claimed.recipient || c.customer.email || '').toLowerCase();
+    if (!EMAIL.test(to)) {
+      await db.query(`UPDATE drafts SET state = 'approved', sending_at = NULL, error = $2 WHERE id = $1`, [draftId, 'Mangler gyldig mottaker']);
+      return { ok: false, status: 400, error: 'Mangler gyldig e-postadresse til mottakeren.' };
+    }
+    let messageId: string | null = null;
     try {
-      await graph().reply(claimed.reply_to_graph_id, claimed.body, claimed.subject);
+      if (claimed.reply_to_graph_id) messageId = (await graph().reply(claimed.reply_to_graph_id, claimed.body, claimed.subject, to)).draftId;
+      else await graph().sendNew(to, claimed.subject, claimed.body);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      await db.query(`UPDATE drafts SET state = 'send_failed', error = $2 WHERE id = $1`, [draftId, msg.slice(0, 300)]);
+      // Reservasjonen fjernes, så utkastet kan sendes på nytt. Ingenting ble sendt.
+      await db.query(`UPDATE drafts SET state = 'approved', sending_at = NULL, error = $2 WHERE id = $1`, [draftId, msg.slice(0, 300)]);
       await activity('system', 'Sending feilet. Ingenting ble sendt.', claimed.case_id, 'danger');
-      return { ok: false as const, status: 502 as any, error: `Sending feilet: ${msg}` };
+      return { ok: false, status: 502, error: `Sending feilet: ${msg}` };
     }
     const at = new Date(now());
-    await db.query(`UPDATE drafts SET state = 'sent', sent_at = $2, error = NULL WHERE id = $1`, [draftId, at]);
-    const c = (await db.query<any>('SELECT * FROM cases WHERE id = $1', [claimed.case_id])).rows[0];
+    await db.query(`UPDATE drafts SET state = 'sent', sent_at = $2, sent_by = $3, sent_to = $4, message_id = $5, error = NULL WHERE id = $1`, [draftId, at, who.email, to, messageId]);
     await db.query(`INSERT INTO mail_messages(id, tenant_id, case_id, graph_id, conversation_id, direction, from_addr, to_addrs, subject, body, sent_at, delivery_state, drafted_by, approved_by)
       VALUES ($1,$2,$3,NULL,$4,'outbound',$5,$6,$7,$8,$9,'confirmed',$10,$11)`,
-      [randomUUID(), tenantId, c.id, c.conversation_id, JSON.stringify({ name: tenant.owner.name, email: conn.mailbox }), JSON.stringify([{ name: c.customer.name, email: c.customer.email }]),
-        claimed.subject, claimed.body, at, claimed.author, user.email]);
+      [randomUUID(), tenantId, c.id, c.conversation_id, JSON.stringify({ name: tenant.owner.name, email: conn.mailbox }), JSON.stringify([{ name: c.customer.name, email: to }]),
+        claimed.subject, claimed.body, at, claimed.author, claimed.decided_by ?? who.email]);
     await db.query(`UPDATE cases SET status = $2, assigned_agent = 'followup', next_action = 'Venter på svar fra kunden.', updated_at = $3 WHERE id = $1`,
       [c.id, claimed.kind === 'quote' ? 'quote_sent' : 'awaiting_customer', at]);
-    await activity('owner', `${tenant.owner.firstName} godkjente. E-post sendt til ${c.customer.name} (bekreftet av Microsoft).`, c.id, 'success');
-    return { ok: true as const };
+    await activity('owner', `${tenant.owner.firstName} sendte e-post til ${to} (bekreftet av Microsoft).`, c.id, 'success');
+    return { ok: true };
+  }
+
+  /** «Avvis»: fjerner utkastet uten å sende noe. */
+  async function rejectDraft(draftId: string, who: Who, reason?: string): Promise<Result> {
+    const r = (await db.query<any>(`UPDATE drafts SET state = 'rejected', decided_by = $3, decided_at = $4 WHERE id = $1 AND tenant_id = $2 AND state IN ('pending','approved') AND sending_at IS NULL RETURNING case_id, version`,
+      [draftId, tenantId, who.email, new Date(now())])).rows[0];
+    if (!r) return { ok: false, status: 409, error: 'Utkastet er allerede sendt eller lagt bort.' };
+    await db.query(`UPDATE cases SET next_action = 'Utkast avvist. Skriv selv eller be om nytt forslag.', updated_at = $2 WHERE id = $1`, [r.case_id, new Date(now())]);
+    await activity('owner', `${tenant.owner.firstName} avviste utkast v${r.version}${reason ? `: ${reason.slice(0, 200)}` : ''}.`, r.case_id, 'warning');
+    return { ok: true };
+  }
+
+  /** «Skriv på nytt»: gammelt utkast merkes, nytt lages med forrige utkast og beskjeden som kontekst. */
+  async function rewriteDraft(draftId: string, feedback?: string): Promise<Result> {
+    const r = (await db.query<any>(`UPDATE drafts SET state = 'superseded', rewritten = true WHERE id = $1 AND tenant_id = $2 AND state IN ('pending','approved') AND sending_at IS NULL RETURNING *`,
+      [draftId, tenantId])).rows[0];
+    if (!r) return { ok: false, status: 409, error: 'Utkastet kan ikke skrives på nytt (allerede sendt eller lagt bort).' };
+    try {
+      const id = await createDraft(r.case_id, { kind: r.kind === 'reply' || r.kind === 'info_request' || r.kind === 'follow_up' || r.kind === 'quote' ? r.kind : undefined, feedback: feedback?.slice(0, 500) || undefined, previous: { subject: r.subject, body: r.body } });
+      return { ok: true, id };
+    } catch (e) {
+      // Ingenting skal gå tapt hvis AI feiler: det gamle utkastet legges tilbake.
+      await db.query(`UPDATE drafts SET state = $2, rewritten = false WHERE id = $1`, [draftId, r.state]);
+      return { ok: false, status: 502, error: `Kunne ikke lage nytt forslag: ${e instanceof Error ? e.message : String(e)}` };
+    }
   }
 
   // ── Mapping til frontendens typer ──────────────────────────────────────────
@@ -286,7 +357,12 @@ export function createMail(d: MailDeps) {
       })),
       drafts: drafts.map((x) => ({
         id: x.id, caseId: x.case_id, kind: x.kind, author: x.author, subject: x.subject, body: x.body, rationale: x.rationale, missing: x.missing ?? [],
-        requiresHumanJudgement: x.judgement ?? [], createdAt: iso(x.created_at), version: x.version, state: x.state === 'sending' ? 'approved' : x.state, idempotencyKey: x.id,
+        requiresHumanJudgement: x.judgement ?? [], createdAt: iso(x.created_at), version: x.version, state: x.state, idempotencyKey: x.id,
+        language: x.language, recipient: x.recipient ?? cases.find((c) => c.id === x.case_id)?.customer?.email ?? '',
+        original: x.original_subject != null ? { subject: x.original_subject, body: x.original_body } : undefined,
+        editedBy: x.edited_by ?? undefined, decidedBy: x.decided_by ?? undefined, decidedAt: x.decided_at ? iso(x.decided_at) : undefined,
+        sentAt: x.sent_at ? iso(x.sent_at) : undefined, sentBy: x.sent_by ?? undefined, sentTo: x.sent_to ?? undefined,
+        error: x.error ?? undefined, rewritten: !!x.rewritten, feedback: x.feedback ?? undefined,
       })),
       activities: acts.slice(0, 120).map((a) => ({ id: String(a.id), at: iso(a.at), actor: a.actor, caseId: a.case_id ?? undefined, text: a.text, tone: a.tone ?? undefined })),
       ignored: ignored.map((i) => ({ message: { id: i.graph_id, threadId: '', direction: 'inbound', from: { name: i.sender_domain, email: i.sender_domain }, to: [], subject: '(innhold lagres ikke)', body: '', sentAt: iso(i.at), attachments: [] }, reason: i.reason })),
@@ -354,16 +430,18 @@ export function createMail(d: MailDeps) {
         const prev = await getConn();
         const same = prev && prev.ms_user_id === me.id;
         await db.query(`INSERT INTO mail_connections(tenant_id, mailbox, ms_tenant_id, ms_user_id, refresh_token_enc, access_token_enc, access_expires_at, status, last_error, connected_by, connected_at, inbox_watermark, sent_watermark, sending_enabled)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,'connected',NULL,$8,$9,NULL,NULL,false)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,'connected',NULL,$8,$9,NULL,NULL,$11)
           ON CONFLICT (tenant_id) DO UPDATE SET mailbox = EXCLUDED.mailbox, ms_tenant_id = EXCLUDED.ms_tenant_id, ms_user_id = EXCLUDED.ms_user_id,
             refresh_token_enc = EXCLUDED.refresh_token_enc, access_token_enc = EXCLUDED.access_token_enc, access_expires_at = EXCLUDED.access_expires_at,
-            status = 'connected', last_error = NULL, connected_by = EXCLUDED.connected_by,
+            status = 'connected', last_error = NULL, connected_by = EXCLUDED.connected_by, sending_enabled = EXCLUDED.sending_enabled,
             connected_at = CASE WHEN $10 THEN mail_connections.connected_at ELSE EXCLUDED.connected_at END,
             inbox_watermark = CASE WHEN $10 THEN mail_connections.inbox_watermark ELSE NULL END,
             sent_watermark = CASE WHEN $10 THEN mail_connections.sent_watermark ELSE NULL END`,
-          [tenantId, mail, claims.tid, me.id, encryptSecret(t.refresh_token, d.tokenKey), encryptSecret(t.access_token, d.tokenKey), new Date(now() + t.expires_in * 1000), user(c).id, new Date(now()), !!same]);
-        await h.audit(user(c), 'mail.connected', `${mail} koblet til (skyggemodus)`);
-        await activity('system', `E-post koblet til: ${mail}. Skyggemodus: ingenting sendes fra Agentkontoret.`, null, 'success');
+          [tenantId, mail, claims.tid, me.id, encryptSecret(t.refresh_token, d.tokenKey), encryptSecret(t.access_token, d.tokenKey), new Date(now() + t.expires_in * 1000), user(c).id, new Date(now()), !!same, sendOnConnect]);
+        await h.audit(user(c), 'mail.connected', `${mail} koblet til${sendOnConnect ? '' : ' (skyggemodus)'}`);
+        await activity('system', sendOnConnect
+          ? `E-post koblet til: ${mail}. Agentene lager forslag. Ingenting sendes før ${tenant.owner.firstName} har trykket «Godkjenn» og «Send».`
+          : `E-post koblet til: ${mail}. Skyggemodus: ingenting sendes fra Agentkontoret.`, null, 'success');
         void syncOnce();
         return back('tilkoblet');
       } catch (e) {
@@ -390,54 +468,91 @@ export function createMail(d: MailDeps) {
 
     app.post('/api/mail/sync-now', h.requireSuperadmin, async (c) => c.json((await syncOnce()) ?? { skipped: true }));
 
+    const reply = (c: Context<Env>, r: Result) => (r.ok ? c.json({ ok: true, ...(r.id ? { id: r.id } : {}) }) : c.json({ error: r.error }, r.status));
+
+    // Godkjenn (med eventuelt redigert tekst). To samtidige godkjenninger gir 200 og 409.
+    app.post('/api/drafts/:id/approve', async (c) => {
+      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan godkjenne utkast.');
+      const b = await h.body(c);
+      const r = await approveDraft(c.req.param('id'), user(c), b);
+      if (r.ok) await h.audit(user(c), 'draft.approved', c.req.param('id'));
+      return reply(c, r);
+    });
+
+    // Rediger godkjent, ikke-sendt utkast (tekst og mottaker).
+    app.put('/api/drafts/:id/text', async (c) => {
+      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan redigere utkast.');
+      return reply(c, await updateApproved(c.req.param('id'), user(c), await h.body(c)));
+    });
+
+    // Send godkjent utkast. Bekreftelsen skjer i appen (to klikk).
     app.post('/api/drafts/:id/send', async (c) => {
       if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan sende e-post til kunder.');
-      const b = await h.body(c);
-      const r = await sendDraft(c.req.param('id'), user(c), { subject: b.subject as string, body: b.body as string });
-      if (!r.ok) return c.json({ error: r.error }, r.status);
-      await h.audit(user(c), 'draft.approved_sent', c.req.param('id'));
-      return c.json({ ok: true });
+      const r = await sendDraft(c.req.param('id'), user(c));
+      if (r.ok) await h.audit(user(c), 'email.sent', c.req.param('id'));
+      return reply(c, r);
     });
 
     app.post('/api/drafts/:id/reject', async (c) => {
       if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan avvise utkast.');
-      const r = (await db.query<any>(`UPDATE drafts SET state = 'rejected' WHERE id = $1 AND tenant_id = $2 AND state IN ('pending','send_failed') RETURNING case_id`, [c.req.param('id'), tenantId])).rows[0];
-      if (!r) return h.err(c, 409, 'Utkastet finnes ikke lenger.');
-      await db.query(`UPDATE cases SET next_action = 'Utkast avvist. Skriv selv eller be om nytt forslag.', updated_at = $2 WHERE id = $1`, [r.case_id, new Date(now())]);
-      await activity('owner', `${tenant.owner.firstName} avviste et utkast.${(await h.body(c)).reason ? '' : ''}`, r.case_id, 'warning');
-      return c.json({ ok: true });
+      const reason = String((await h.body(c)).reason ?? '');
+      return reply(c, await rejectDraft(c.req.param('id'), user(c), reason || undefined));
     });
 
-    app.post('/api/drafts/:id/regenerate', async (c) => {
+    // Skriv på nytt med AI. Feil fra AI gir 502, aldri 401.
+    const rewrite = async (c: Context<Env>) => {
       if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan be om nye utkast.');
-      const dr = (await db.query<any>('SELECT * FROM drafts WHERE id = $1 AND tenant_id = $2', [c.req.param('id'), tenantId])).rows[0];
+      const fb = String((await h.body(c)).feedback ?? '');
+      return reply(c, await rewriteDraft(c.req.param('id'), fb || undefined));
+    };
+    app.post('/api/drafts/:id/rewrite', rewrite);
+    app.post('/api/drafts/:id/regenerate', rewrite);
+
+    // Oversett teksten som står i feltene. Lagrer ingenting.
+    app.post('/api/drafts/:id/translate', async (c) => {
+      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan oversette utkast.');
+      const b = await h.body(c);
+      const language = String(b.language ?? '') as Lang;
+      if (!(language in LANGS)) return h.err(c, 400, 'Ukjent språk.');
+      const dr = (await db.query('SELECT 1 FROM drafts WHERE id = $1 AND tenant_id = $2', [c.req.param('id'), tenantId])).rows[0];
       if (!dr) return h.err(c, 404, 'Fant ikke utkastet.');
-      const fb = String((await h.body(c)).feedback ?? '').slice(0, 500);
-      await createDraft(dr.case_id, { kind: dr.kind, feedback: fb || undefined });
-      return c.json({ ok: true });
+      if (!d.ai.apiKey) return h.err(c, 409, 'Oversettelse krever at AI er koblet til.');
+      try {
+        return c.json(await translate(d.ai, tenant, { language, subject: String(b.subject ?? ''), body: String(b.body ?? '') }));
+      } catch (e) {
+        log('warn', 'Oversettelse feilet', { error: String(e) });
+        return h.err(c, 502, 'Oversettelsen feilet. Prøv igjen.');
+      }
     });
 
     app.post('/api/cases/:id/draft', async (c) => {
       if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan be om utkast.');
       if (!(await caseOf(c.req.param('id')))) return h.err(c, 404, 'Fant ikke saken.');
       const kind = String((await h.body(c)).kind ?? '');
-      await createDraft(c.req.param('id'), { kind: (['reply', 'info_request', 'follow_up', 'quote'] as const).find((k) => k === kind) });
-      return c.json({ ok: true });
+      try {
+        const id = await createDraft(c.req.param('id'), { kind: (['reply', 'info_request', 'follow_up', 'quote'] as const).find((k) => k === kind) });
+        return c.json({ ok: true, id });
+      } catch (e) { return h.err(c, 502, `Kunne ikke lage utkast: ${e instanceof Error ? e.message : String(e)}`); }
     });
 
+    // Eieren skriver selv: utkastet er godkjent av ham og legges i Send-køen. Sending krever eget klikk.
     app.post('/api/cases/:id/manual', async (c) => {
-      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan sende e-post til kunder.');
+      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan skrive til kunder.');
       const kase = await caseOf(c.req.param('id'));
       if (!kase) return h.err(c, 404, 'Fant ikke saken.');
       const b = await h.body(c);
+      const subject = String(b.subject ?? '').trim().slice(0, 300);
+      const body = String(b.body ?? '').slice(0, 20000);
+      if (!subject || !body.trim()) return h.err(c, 400, 'Emne og tekst må fylles ut.');
       const lastIn = (await db.query<{ graph_id: string }>(`SELECT graph_id FROM mail_messages WHERE case_id = $1 AND direction = 'inbound' AND graph_id IS NOT NULL ORDER BY sent_at DESC LIMIT 1`, [kase.id])).rows[0];
-      await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND state IN ('pending','send_failed')`, [kase.id]);
+      await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND state IN ('pending','approved','send_failed') AND sending_at IS NULL`, [kase.id]);
       const id = randomUUID();
-      await db.query(`INSERT INTO drafts(id, tenant_id, case_id, kind, author, subject, body, rationale, state, reply_to_graph_id, created_at) VALUES ($1,$2,$3,'reply','owner',$4,$5,'Skrevet av eieren','pending',$6,$7)`,
-        [id, tenantId, kase.id, String(b.subject ?? '').slice(0, 300), String(b.body ?? '').slice(0, 20000), lastIn?.graph_id ?? null, new Date(now())]);
-      const r = await sendDraft(id, user(c));
-      if (!r.ok) return c.json({ error: r.error }, r.status);
-      return c.json({ ok: true });
+      const version = (await db.query<{ v: number }>('SELECT COALESCE(max(version),0)::int AS v FROM drafts WHERE case_id = $1', [kase.id])).rows[0].v + 1;
+      await db.query(`INSERT INTO drafts(id, tenant_id, case_id, kind, author, subject, body, rationale, state, reply_to_graph_id, created_at, version, decided_by, decided_at)
+        VALUES ($1,$2,$3,'reply','owner',$4,$5,'Skrevet av eieren','approved',$6,$7,$8,$9,$7)`,
+        [id, tenantId, kase.id, subject, body, lastIn?.graph_id ?? null, new Date(now()), version, user(c).email]);
+      await activity('owner', `${tenant.owner.firstName} skrev en melding selv. Klar for sending.`, kase.id);
+      return c.json({ ok: true, id });
     });
 
     app.post('/api/cases/:id', async (c) => {
@@ -473,5 +588,5 @@ export function createMail(d: MailDeps) {
     });
   }
 
-  return { routes, syncOnce, latestDeliveredRun, status, state, createDraft, sendDraft, accessToken };
+  return { routes, syncOnce, latestDeliveredRun, status, state, createDraft, approveDraft, updateApproved, sendDraft, rejectDraft, rewriteDraft, accessToken };
 }
