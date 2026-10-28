@@ -41,6 +41,7 @@ const fakeFetch: typeof fetch = async (input: any, init: any = {}) => {
   if (url.endsWith('/me?$select=id,mail,userPrincipalName,displayName')) return json({ id: 'user-1', mail: meMail, userPrincipalName: meMail });
   if (url.includes('/mailFolders/inbox/messages')) return json({ value: inbox.filter((m) => m.receivedDateTime >= decodeURIComponent(url).match(/ge (\S+)&/)![1]) });
   if (url.includes('/mailFolders/sentitems/messages')) return json({ value: sent.filter((m) => m.receivedDateTime >= decodeURIComponent(url).match(/ge (\S+)&/)![1]) });
+  if (url.endsWith('/$value')) return new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]), { status: 200, headers: { 'content-type': 'image/jpeg' } });
   if (url.includes('/attachments')) return json({ value: [{ id: 'a1', name: 'sikringsskap.jpg', size: 204800, contentType: 'image/jpeg', isInline: false }] });
   if (url.includes('/createReply')) return json({ id: 'draft-' + Math.random(), subject: 'SV: x' });
   if (/\/messages\/[^/]+\/send$/.test(url)) return sendFails ? json({ error: { message: 'Mailbox busy' } }, 400) : new Response(null, { status: 202 });
@@ -269,6 +270,24 @@ const acts = (await espen.req('GET', '/api/state')).json.activities.map((a: any)
 for (const w of ['godkjente', 'redigerte', 'skrev utkastet på nytt', 'sendte e-post', 'Sending feilet', 'skrev en melding selv']) assert.ok(acts.includes(w), `logget: ${w}`);
 ok('Egen melding går via Send-køen. Alt logges: godkjent, redigert, skrevet på nytt, sendt, feilet.');
 
+// 10c. Innlimte bilder (iPhone) hentes selv om Microsoft sier «ingen vedlegg», og vedlegg kan åpnes trygt
+inbox.push(msg('m6', 'conv-6', 'bilde@test.no', 'Bilde Kunde', 'Bilder av skapet', 'Hei, se bilder.\n\n [IMG_6698.jpeg] [IMG_6697.jpeg]', '2026-10-23T10:50:00Z', { hasAttachments: false }));
+clock = Date.parse('2026-10-23T10:51:00Z');
+await mail.syncOnce();
+const st6 = (await espen.req('GET', '/api/state')).json;
+const m6 = st6.messages.find((m: any) => m.from.email === 'bilde@test.no');
+assert.equal(m6.attachments.length, 1, 'innlimt bilde hentet');
+const attRes = await app.request(`/api/messages/${m6.id}/attachments/${m6.attachments[0].id}`, { headers: { cookie: [...espen.jar].map(([k, v]) => `${k}=${v}`).join('; ') } });
+assert.equal(attRes.status, 200);
+assert.equal(attRes.headers.get('content-type'), 'image/jpeg');
+assert.equal(attRes.headers.get('x-content-type-options'), 'nosniff');
+assert.match(attRes.headers.get('content-security-policy') ?? '', /sandbox/);
+assert.equal((await app.request(`/api/messages/${m6.id}/attachments/${m6.attachments[0].id}`)).status, 401, 'krever innlogging');
+assert.equal((await espen.req('GET', `/api/messages/${m6.id}/attachments/finnes-ikke`)).status, 404);
+const aiTriage = calls.filter((c) => c.url.includes('anthropic') && c.body!.includes('Bilder av skapet')).at(-1)!;
+assert.ok(!aiTriage.body!.includes('IMG_6698'), 'AI får ren tekst uten plassholdere');
+ok('Innlimte bilder hentes, vedlegg åpnes bare innlogget og trygt, AI får ren tekst');
+
 // 11. Synkroniseringsrunder registreres for helserapportering
 const lastRun = await mail.latestDeliveredRun();
 assert.ok(lastRun && lastRun.scan_run_id.startsWith('mail-sync-') && lastRun.persisted_at);
@@ -282,5 +301,5 @@ assert.equal(st.status, 'reconnect_required'); assert.equal(st.connected, false)
 assert.equal(await mail.syncOnce(), null);
 ok('Utløpt Microsoft-tilkobling oppdages og vises. Synk stopper uten å krasje.');
 
-console.log(`\n${pass} av 16 tester bestått`);
+console.log(`\n${pass} av 17 tester bestått`);
 process.exit(0);

@@ -6,6 +6,7 @@ import type { TenantConfig } from '../src/config/tenant';
 import { decryptSecret, encryptSecret } from './auth/totp';
 import { newToken, sha256 } from './auth/crypto';
 import { Graph, MsAuthError, addr, authorizeUrl, exchangeCode, idTokenClaims, pkce, refreshTokens, type Fetch, type GraphMessage, type MsConfig } from './microsoft';
+import { cleanMail } from '../src/lib/cleanMail';
 import { draftReply, translate, triage, LANGS, type AiConfig, type InMail, type Lang } from './ai';
 
 /**
@@ -45,6 +46,7 @@ export function createMail(d: MailDeps) {
   const log = (d.log ?? defaultLog)!;
   const f = d.fetch ?? fetch;
   let syncing = false;
+  let backfilled = false;
 
   const activity = (actor: string, text: string, caseId?: string | null, tone?: string) =>
     db.query('INSERT INTO activities(tenant_id, at, actor, case_id, text, tone) VALUES ($1,$2,$3,$4,$5,$6)', [tenantId, new Date(now()), actor, caseId ?? null, text, tone ?? null]);
@@ -82,7 +84,7 @@ export function createMail(d: MailDeps) {
   async function threadFor(caseId: string) {
     return (await db.query<{ direction: 'inbound' | 'outbound'; from_addr: any; sent_at: Date; subject: string; body: string }>(
       'SELECT direction, from_addr, sent_at, subject, body FROM mail_messages WHERE case_id = $1 ORDER BY sent_at', [caseId])).rows
-      .map((m) => ({ direction: m.direction, from: `${m.from_addr.name} <${m.from_addr.email}>`, at: new Date(m.sent_at).toISOString(), subject: m.subject, body: m.body }));
+      .map((m) => ({ direction: m.direction, from: `${m.from_addr.name} <${m.from_addr.email}>`, at: new Date(m.sent_at).toISOString(), subject: m.subject, body: cleanMail(m.body).text || m.body }));
   }
 
   /** AIOliver lager et utkast og legger saken til godkjenning. */
@@ -109,8 +111,11 @@ export function createMail(d: MailDeps) {
     return draftId;
   }
 
+  /** Bilder limt inn i teksten (typisk fra iPhone) gir ikke hasAttachments=true hos Microsoft. */
+  const hasInlineImages = (body: string) => /\[(cid:[^\]]+|[^\]\n]{1,80}\.(jpe?g|png|gif|heic|heif|webp))\]/i.test(body);
+
   async function attachmentsFor(m: GraphMessage): Promise<{ id: string; filename: string; mimeType: string; sizeKb: number; scan: string; kind: string }[]> {
-    if (!m.hasAttachments) return [];
+    if (!m.hasAttachments && !hasInlineImages(m.body?.content ?? '')) return [];
     try {
       return (await graph().attachments(m.id)).map((a) => ({
         id: a.id, filename: a.name, mimeType: a.contentType, sizeKb: Math.round(a.size / 1024), scan: 'pending',
@@ -146,6 +151,18 @@ export function createMail(d: MailDeps) {
     const mailbox = conn.mailbox.toLowerCase();
     try {
       const g = graph();
+      // Engangs: hent innlimte bilder for e-poster som ble synkronisert før dette ble støttet.
+      if (!backfilled) {
+        backfilled = true;
+        const old = (await db.query<{ id: string; graph_id: string; body: string }>(`SELECT id, graph_id, body FROM mail_messages
+          WHERE tenant_id = $1 AND direction = 'inbound' AND graph_id IS NOT NULL AND attachments = '[]'::jsonb AND sent_at > $2 LIMIT 50`,
+          [tenantId, new Date(now() - 30 * 864e5)])).rows.filter((r) => hasInlineImages(r.body));
+        for (const r of old) {
+          const atts = await attachmentsFor({ id: r.graph_id, hasAttachments: true } as GraphMessage);
+          if (atts.length) await db.query('UPDATE mail_messages SET attachments = $2 WHERE id = $1', [r.id, JSON.stringify(atts)]);
+        }
+        if (old.length) log('info', 'Hentet innlimte bilder for eldre e-poster', { messages: old.length });
+      }
       // ── Innboks ──
       const inboxSince = conn.inbox_watermark ? new Date(conn.inbox_watermark) : new Date(new Date(conn.connected_at).getTime() - (d.initialSyncDays ?? 3) * 864e5);
       let watermark = inboxSince;
@@ -165,7 +182,7 @@ export function createMail(d: MailDeps) {
           if (!['won', 'lost'].includes(existing.status)) await createDraft(existing.id);
         } else {
           const atts = await attachmentsFor(m);
-          const mail: InMail = { fromName: from.name, fromEmail: from.email, subject: m.subject ?? '', body: m.body?.content ?? '', receivedAt: m.receivedDateTime, attachments: atts.map((a) => a.filename) };
+          const mail: InMail = { fromName: from.name, fromEmail: from.email, subject: m.subject ?? '', body: cleanMail(m.body?.content ?? '').text || (m.body?.content ?? ''), receivedAt: m.receivedDateTime, attachments: atts.map((a) => a.filename) };
           const t = await triage(d.ai, tenant, mail);
           if (!t.is_customer_inquiry) {
             await db.query('INSERT INTO triage_log(tenant_id, graph_id, decision, reason, sender_domain, at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING',
@@ -396,6 +413,33 @@ export function createMail(d: MailDeps) {
     app.use('/api/state', h.requireUser);
     app.use('/api/drafts/*', h.requireUser);
     app.use('/api/cases/*', h.requireUser);
+    app.use('/api/messages/*', h.requireUser);
+
+    // Vedlegg hentes direkte fra Microsoft ved visning (lagres ikke hos oss).
+    // Bare bilder vises i nettleseren; alt annet lastes ned. Ingen aktivt innhold (HTML/SVG) kjøres på vårt domene.
+    const SAFE_INLINE = /^image\/(jpeg|png|gif|webp|heic|heif)$/i;
+    app.get('/api/messages/:id/attachments/:attId', async (c) => {
+      const m = (await db.query<any>('SELECT graph_id, attachments FROM mail_messages WHERE id = $1 AND tenant_id = $2', [c.req.param('id'), tenantId])).rows[0];
+      const a = m?.graph_id ? (m.attachments ?? []).find((x: any) => x.id === c.req.param('attId')) : null;
+      if (!a) return h.err(c, 404, 'Fant ikke vedlegget.');
+      if (a.sizeKb > 30 * 1024) return h.err(c, 409, 'Vedlegget er for stort til å vises her. Åpne det i Outlook.');
+      try {
+        const { bytes } = await graph().attachmentBytes(m.graph_id, a.id);
+        const type = String(a.mimeType || 'application/octet-stream').toLowerCase();
+        const inline = SAFE_INLINE.test(type) || type === 'application/pdf';
+        const name = String(a.filename || 'vedlegg').replace(/["\\\r\n]/g, '_');
+        return new Response(bytes, { headers: {
+          'Content-Type': inline ? type : 'application/octet-stream',
+          'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox",
+          'Cache-Control': 'private, max-age=3600',
+        } });
+      } catch (e) {
+        log('warn', 'Kunne ikke hente vedlegg', { error: String(e) });
+        return h.err(c, 502, 'Kunne ikke hente vedlegget fra Microsoft. Prøv igjen.');
+      }
+    });
 
     app.get('/api/state', async (c) => c.json(await state()));
     app.get('/api/mail/status', async (c) => c.json(await status()));
