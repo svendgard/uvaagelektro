@@ -70,7 +70,7 @@ function Message({ m }: { m: EmailMessage }) {
         <div className="flex flex-wrap items-center justify-end gap-2 text-[11px]">
           {by && <span className="text-muted">Utkast: {by} · godkjent av {tenant.owner.firstName}</span>}
           {!by && <span className="text-muted">Skrevet av {tenant.owner.firstName}</span>}
-          {ds === 'confirmed' && <span className="inline-flex items-center gap-1 rounded-full bg-ok-soft px-2 font-semibold text-ok"><Icon name="check" className="h-3 w-3" />Bekreftet sendt (simulert)</span>}
+          {ds === 'confirmed' && <span className="inline-flex items-center gap-1 rounded-full bg-ok-soft px-2 font-semibold text-ok"><Icon name="check" className="h-3 w-3" />{DEMO ? 'Bekreftet sendt (simulert)' : 'Sendt'}</span>}
           {ds === 'sending' && <span className="inline-flex items-center gap-1 rounded-full bg-sunk px-2 font-semibold text-muted"><span className="h-1.5 w-1.5 rounded-full bg-faint pulse" />Sender · ikke bekreftet ennå</span>}
           {ds === 'failed' && <span className="inline-flex items-center gap-1 rounded-full bg-bad-soft px-2 font-semibold text-bad"><Icon name="alert" className="h-3 w-3" />Ikke sendt · feilet</span>}
         </div>
