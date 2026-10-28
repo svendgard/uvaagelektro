@@ -48,7 +48,9 @@
 }
 
 html, body { background: var(--bg); color: var(--ink); }
-body { font-family: Figtree, ui-sans-serif, system-ui, sans-serif; font-size: 14px; -webkit-font-smoothing: antialiased; }
+body { font-family: Figtree, ui-sans-serif, system-ui, sans-serif; font-size: 14px; -webkit-font-smoothing: antialiased; overflow-wrap: break-word; }
+/* Lange lenker og adresser i e-post (f.eks. sporingslenker) brytes i stedet for å gå ut av vinduet. */
+.whitespace-pre-wrap, .break-anywhere { overflow-wrap: anywhere; word-break: normal; }
 h1, h2, h3 { text-wrap: balance; }
 .tnum { font-variant-numeric: tabular-nums; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }

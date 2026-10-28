@@ -29,12 +29,12 @@ function Message({ m }: { m: EmailMessage }) {
   const ds = m.deliveryState;
   return (
     <article className={cx('flex flex-col gap-1', out ? 'items-end' : 'items-start')}>
-      <div className={cx('w-full max-w-[640px] rounded-xl border px-4 py-3', out ? 'border-brand/25 bg-brand-soft' : 'border-line bg-surface')}>
+      <div className={cx('w-full min-w-0 max-w-[640px] rounded-xl border px-4 py-3', out ? 'border-brand/25 bg-brand-soft' : 'border-line bg-surface')}>
         <header className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-xs">
-          <span><b className="text-[13px] text-ink">{m.from.name}</b> <span className="text-muted">&lt;{m.from.email}&gt;</span></span>
+          <span className="break-anywhere min-w-0"><b className="text-[13px] text-ink">{m.from.name}</b> <span className="text-muted">&lt;{m.from.email}&gt;</span></span>
           <time className="text-faint" dateTime={m.sentAt}>{fmtDateTime(m.sentAt)}</time>
         </header>
-        <p className="mb-1 text-xs text-muted">Til: {m.to.map((t) => t.email).join(', ')} · <span className="font-semibold text-ink">{m.subject}</span></p>
+        <p className="break-anywhere mb-1 text-xs text-muted">Til: {m.to.map((t) => t.email).join(', ')} · <span className="font-semibold text-ink">{m.subject}</span></p>
         <div className="whitespace-pre-wrap text-[13px] leading-relaxed">{m.body}</div>
         {m.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{m.attachments.map((a) => <AttachmentChip key={a.id} a={a} />)}</div>}
       </div>
