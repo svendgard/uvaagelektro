@@ -63,16 +63,17 @@ async function post(cfg: AiConfig, url: string, headers: Record<string, string>,
 
 async function callTool<T>(cfg: AiConfig, model: string, system: string, user: string, tool: { name: string; description: string; input_schema: object }, maxTokens = 1500): Promise<T> {
   if (cfg.provider === 'openai') {
-    // OpenAI: tvunget funksjonskall. Resonnerende modeller bruker egne tokens til tenking, derfor romsligere grense.
-    const json = await post(cfg, 'https://api.openai.com/v1/chat/completions', { authorization: `Bearer ${cfg.apiKey}` }, {
-      model, max_completion_tokens: Math.max(maxTokens * 4, 6000),
-      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      tools: [{ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.input_schema } }],
-      tool_choice: { type: 'function', function: { name: tool.name } },
+    // OpenAI Responses API med tvunget funksjonskall. (Chat Completions støtter ikke funksjonskall
+    // sammen med resonnering for de nyeste modellene.) Resonnering bruker egne tokens, derfor romsligere grense.
+    const json = await post(cfg, 'https://api.openai.com/v1/responses', { authorization: `Bearer ${cfg.apiKey}` }, {
+      model, instructions: system, input: user, store: false,
+      max_output_tokens: Math.max(maxTokens * 4, 6000),
+      tools: [{ type: 'function', name: tool.name, description: tool.description, parameters: tool.input_schema, strict: false }],
+      tool_choice: { type: 'function', name: tool.name },
     });
-    const call = json.choices?.[0]?.message?.tool_calls?.find((c: any) => c.function?.name === tool.name);
-    if (!call) throw new Error('AI svarte uten strukturert resultat');
-    try { return JSON.parse(call.function.arguments) as T; } catch { throw new Error('AI svarte med ugyldig struktur'); }
+    const call = (json.output ?? []).find((o: any) => o.type === 'function_call' && o.name === tool.name);
+    if (!call) throw new Error(json.status === 'incomplete' ? `AI svarte ufullstendig (${json.incomplete_details?.reason ?? 'ukjent'})` : 'AI svarte uten strukturert resultat');
+    try { return JSON.parse(call.arguments) as T; } catch { throw new Error('AI svarte med ugyldig struktur'); }
   }
   const json = await post(cfg, 'https://api.anthropic.com/v1/messages', { 'x-api-key': cfg.apiKey!, 'anthropic-version': '2023-06-01' },
     { model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }], tools: [tool], tool_choice: { type: 'tool', name: tool.name } });
