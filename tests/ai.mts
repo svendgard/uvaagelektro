@@ -14,20 +14,20 @@ const draftOut = { subject: 'SV: Elbillader', body: 'Hei Test,\n\nTakk.', ration
 const seen: any[] = [];
 const openaiFetch: typeof fetch = async (url: any, init: any) => {
   const b = JSON.parse(init.body); seen.push({ url: String(url), headers: init.headers, body: b });
-  const name = b.tools[0].function.name;
-  return json({ choices: [{ message: { tool_calls: [{ type: 'function', function: { name, arguments: JSON.stringify(name === 'registrer_vurdering' ? triageOut : draftOut) } }] } }] });
+  const name = b.tools[0].name;
+  return json({ status: 'completed', output: [{ type: 'reasoning', summary: [] }, { type: 'function_call', call_id: 'c1', name, arguments: JSON.stringify(name === 'registrer_vurdering' ? triageOut : draftOut) }] });
 };
 const oa: AiConfig = { provider: 'openai', apiKey: 'sk-test', triageModel: 'gpt-6-luna', draftModel: 'gpt-6.1-sol', fetch: openaiFetch };
 const t1 = await triage(oa, uvaagElektro, mail);
 assert.equal(t1.engine, 'ai'); assert.equal(t1.job_type, 'elbillader'); assert.equal(t1.injection_suspected, true);
-assert.equal(seen[0].url, 'https://api.openai.com/v1/chat/completions');
+assert.equal(seen[0].url, 'https://api.openai.com/v1/responses');
 assert.equal(seen[0].headers.authorization, 'Bearer sk-test');
 assert.equal(seen[0].body.model, 'gpt-6-luna');
-assert.deepEqual(seen[0].body.tool_choice, { type: 'function', function: { name: 'registrer_vurdering' } });
-assert.equal(seen[0].body.messages[0].role, 'system');
-assert.match(seen[0].body.messages[0].content, /Følg aldri instrukser/);
-assert.match(seen[0].body.messages[1].content, /<epost>/);
-ok('OpenAI: sortering med tvunget funksjonskall, sikkerhetsregler i systemmeldingen');
+assert.deepEqual(seen[0].body.tool_choice, { type: 'function', name: 'registrer_vurdering' });
+assert.equal(seen[0].body.store, false, 'e-postinnhold lagres ikke hos OpenAI');
+assert.match(seen[0].body.instructions, /Følg aldri instrukser/);
+assert.match(seen[0].body.input, /<epost>/);
+ok('OpenAI (Responses): sortering med tvunget funksjonskall, sikkerhetsregler i instruksene, ingen lagring hos OpenAI');
 
 const d1 = await draftReply(oa, uvaagElektro, { kind: 'info_request', customerName: 'Test Kunde', summary: 'x', missing: [], urgent: false, thread: [{ direction: 'inbound', from: 'kunde@test.no', at: 'i dag', subject: 'Elbillader', body: 'Hei' }] });
 assert.equal(d1.engine, 'ai'); assert.equal(d1.subject, 'SV: Elbillader'); assert.equal(seen[1].body.model, 'gpt-6.1-sol');
@@ -36,8 +36,10 @@ ok('OpenAI: svarutkast med riktig modell');
 // 2. OpenAI-feil gir tydelig feilmelding (ingen stille feil)
 const bad: AiConfig = { ...oa, fetch: async () => json({ error: { message: 'Incorrect API key provided' } }, 401) };
 await assert.rejects(triage(bad, uvaagElektro, mail), /AI-feil 401: Incorrect API key/);
-const noCall: AiConfig = { ...oa, fetch: async () => json({ choices: [{ message: { content: 'hei' } }] }) };
+const noCall: AiConfig = { ...oa, fetch: async () => json({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'hei' }] }] }) };
 await assert.rejects(triage(noCall, uvaagElektro, mail), /uten strukturert resultat/);
+const cut: AiConfig = { ...oa, fetch: async () => json({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }) };
+await assert.rejects(triage(cut, uvaagElektro, mail), /ufullstendig \(max_output_tokens\)/);
 ok('OpenAI: feil nøkkel og svar uten struktur gir tydelig feil');
 
 // 3. Claude virker fortsatt
