@@ -141,21 +141,41 @@ export class Graph {
     return { bytes: await res.arrayBuffer(), contentType: res.headers.get('content-type') ?? 'application/octet-stream' };
   }
 
-  /** Svar i samme tråd. Lager først et utkast i Outlook, justerer emne/mottaker, og sender. */
+  /**
+   * Svar i samme tråd. Lager et svarutkast i Outlook (med sitert tråd), legger vår tekst øverst som HTML
+   * slik at avsnitt, linjeskift og signatur blir som i Agentkontoret, justerer emne/mottaker og sender.
+   */
   async reply(messageId: string, text: string, subject?: string, to?: string): Promise<{ draftId: string }> {
-    const draft = await this.call<{ id: string; subject?: string; toRecipients?: GraphAddress[] }>('POST', `/me/messages/${encodeURIComponent(messageId)}/createReply`, { comment: text });
-    const patch: Record<string, unknown> = {};
+    const draft = await this.call<{ id: string; subject?: string; toRecipients?: GraphAddress[]; body?: { contentType: string; content: string } }>(
+      'POST', `/me/messages/${encodeURIComponent(messageId)}/createReply`, {}, { Prefer: 'outlook.body-content-type="html"' });
+    const ours = textToHtml(text);
+    const quoted = draft.body?.content ?? '';
+    const content = /<body[^>]*>/i.test(quoted) ? quoted.replace(/<body[^>]*>/i, (m) => `${m}${ours}`) : `${ours}${quoted}`;
+    const patch: Record<string, unknown> = { body: { contentType: 'HTML', content } };
     if (subject && subject !== draft.subject) patch.subject = subject;
     if (to && !(draft.toRecipients ?? []).some((r) => r.emailAddress.address?.toLowerCase() === to.toLowerCase())) patch.toRecipients = [{ emailAddress: { address: to } }];
-    if (Object.keys(patch).length) await this.call('PATCH', `/me/messages/${encodeURIComponent(draft.id)}`, patch);
+    await this.call('PATCH', `/me/messages/${encodeURIComponent(draft.id)}`, patch);
     await this.call('POST', `/me/messages/${encodeURIComponent(draft.id)}/send`);
     return { draftId: draft.id };
   }
 
   /** Ny e-post (når det ikke finnes en innkommende e-post å svare på). */
   async sendNew(to: string, subject: string, text: string): Promise<void> {
-    await this.call('POST', '/me/sendMail', { message: { subject, body: { contentType: 'Text', content: text }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true });
+    await this.call('POST', '/me/sendMail', { message: { subject, body: { contentType: 'HTML', content: textToHtml(text) }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true });
   }
+}
+
+const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/**
+ * Ren tekst til e-post-HTML: tom linje = nytt avsnitt, linjeskift = <br>. Samme skrift som Outlook bruker som standard.
+ * Lenker gjøres klikkbare. Ingen annen formatering, så e-posten ser ut som om Espen skrev den selv.
+ */
+export function textToHtml(text: string): string {
+  const linkify = (t: string) => esc(t).replace(/\bhttps?:\/\/[^\s<>"]+[^\s<>".,;:!?)]/g, (u) => `<a href="${u}">${u}</a>`);
+  const paras = text.replace(/\r\n?/g, '\n').trim().split(/\n{2,}/)
+    .map((p) => `<p style="margin:0 0 11pt 0">${p.split('\n').map(linkify).join('<br>')}</p>`).join('');
+  return `<div style="font-family:Aptos,Calibri,Arial,Helvetica,sans-serif;font-size:11pt;color:#000000">${paras}</div><br>`;
 }
 
 export const addr = (a?: GraphAddress) => ({ name: a?.emailAddress?.name ?? a?.emailAddress?.address ?? '', email: (a?.emailAddress?.address ?? '').toLowerCase() });
