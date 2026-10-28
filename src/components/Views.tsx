@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { MailConnectionCard } from './MailConnection';
+import { previewText } from '../lib/cleanMail';
 import { useStore } from '../state/store';
 import { AUTOMATION_LEVELS } from '../config/tenant';
 import type { UserRole } from '../domain/types';
@@ -42,7 +43,7 @@ export function InboxView({ openCase }: { openCase: (id: string) => void }) {
                       <span className="text-xs text-muted">{m.from.email}</span>
                       {m.attachments.length > 0 && <span className="inline-flex items-center gap-0.5 text-xs text-muted"><Icon name="paperclip" className="h-3.5 w-3.5" />{m.attachments.length}</span>}
                     </div>
-                    <p className="truncate text-[13px]"><span className="font-semibold">{m.subject}</span> <span className="text-muted">· {m.body.replace(/\s+/g, ' ').slice(0, 110)}</span></p>
+                    <p className="truncate text-[13px]"><span className="font-semibold">{m.subject}</span> <span className="text-muted">· {previewText(m.body)}</span></p>
                   </div>
                   <div className="flex shrink-0 items-center gap-3">
                     <span className="font-mono text-[11px] text-faint">{c.number}</span>

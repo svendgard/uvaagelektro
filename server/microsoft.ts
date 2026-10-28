@@ -128,7 +128,17 @@ export class Graph {
   async attachments(messageId: string) {
     const r = await this.call<{ value: { id: string; name: string; size: number; contentType: string; isInline: boolean }[] }>(
       'GET', `/me/messages/${encodeURIComponent(messageId)}/attachments?$select=id,name,size,contentType,isInline`);
-    return r.value.filter((a) => !a.isInline);
+    // Bilder limt inn i e-posten (typisk fra iPhone) er ekte kundebilder. Små innebygde bilder er logoer og ikoner.
+    return r.value.filter((a) => !a.isInline || (a.contentType.startsWith('image/') && a.size >= 30_000));
+  }
+
+  /** Innholdet i ett vedlegg (rå bytes). */
+  async attachmentBytes(messageId: string, attachmentId: string): Promise<{ bytes: ArrayBuffer; contentType: string }> {
+    const res = await this.f(`${GRAPH}/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}/$value`, {
+      headers: { Authorization: `Bearer ${await this.token()}` }, signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new GraphError(res.status, `Graph svarte ${res.status}`);
+    return { bytes: await res.arrayBuffer(), contentType: res.headers.get('content-type') ?? 'application/octet-stream' };
   }
 
   /** Svar i samme tråd. Lager først et utkast i Outlook, justerer emne/mottaker, og sender. */

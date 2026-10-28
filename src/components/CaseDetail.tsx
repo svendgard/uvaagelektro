@@ -7,19 +7,47 @@ import { ActorAvatar } from './Dashboard';
 import { DEMO } from '../demo';
 import { JobPanel, JobStageBadge } from './Projects';
 import { cx, fmtDateTime, kr } from '../lib/util';
+import { cleanMail, linkify } from '../lib/cleanMail';
 
-function AttachmentChip({ a }: { a: Attachment }) {
+/** Ren e-posttekst: bannere, plassholdere og sitert historikk ryddes bort. Lenker vises kort og klikkbart. */
+function MailBody({ body }: { body: string }) {
+  const { text, quoted } = useMemo(() => cleanMail(body), [body]);
+  const [showQuoted, setShowQuoted] = useState(false);
+  const render = (t: string) => linkify(t).map((p, i) => 'href' in p
+    ? <a key={i} href={p.href} target="_blank" rel="noopener noreferrer nofollow" className="font-semibold text-brand underline decoration-brand/30 underline-offset-2 hover:decoration-brand" title={p.href}>{p.label}</a>
+    : <span key={i}>{p.t}</span>);
   return (
-    <span className="inline-flex items-center gap-2 rounded-lg border border-line bg-surface px-2 py-1.5 text-xs">
-      <span className={cx('flex h-8 w-8 items-center justify-center rounded-md', a.kind === 'image' ? 'bg-info-soft text-info' : 'bg-sunk text-muted')}>
-        <Icon name={a.kind === 'image' ? 'image' : 'file'} />
-      </span>
+    <div className="text-[13px] leading-relaxed">
+      <div className="whitespace-pre-wrap">{text ? render(text) : <span className="text-faint">(Ingen tekst)</span>}</div>
+      {quoted && (
+        <div className="mt-2">
+          <button type="button" onClick={() => setShowQuoted((v) => !v)} className="rounded-full bg-sunk px-2 py-0.5 text-[11px] font-semibold text-muted hover:text-ink">
+            {showQuoted ? 'Skjul tidligere e-poster' : '··· Vis tidligere e-poster'}
+          </button>
+          {showQuoted && <div className="mt-2 whitespace-pre-wrap border-l-2 border-line pl-3 text-xs text-muted">{render(quoted)}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AttachmentChip({ a, messageId }: { a: Attachment; messageId: string }) {
+  const href = DEMO ? undefined : `/api/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(a.id)}`;
+  const showThumb = !!href && a.kind === 'image' && /jpe?g|png|gif|webp/i.test(a.mimeType);
+  const size = a.sizeKb >= 1024 ? `${(a.sizeKb / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(a.sizeKb))} kB`;
+  const inner = (
+    <>
+      {showThumb
+        ? <img src={href} alt={a.filename} loading="lazy" className="h-14 w-14 shrink-0 rounded-md bg-sunk object-cover" />
+        : <span className={cx('flex h-8 w-8 shrink-0 items-center justify-center rounded-md', a.kind === 'image' ? 'bg-info-soft text-info' : 'bg-sunk text-muted')}><Icon name={a.kind === 'image' ? 'image' : 'file'} /></span>}
       <span className="min-w-0">
         <span className="block max-w-[160px] truncate font-semibold">{a.filename}</span>
-        <span className="text-[11px] text-faint">{(a.sizeKb / 1024).toFixed(1)} MB · {a.scan === 'clean' ? 'Skannet, ren' : a.scan === 'pending' ? 'Skannes …' : 'Blokkert'}</span>
+        <span className="text-[11px] text-faint">{size}{DEMO ? ` · ${a.scan === 'clean' ? 'Skannet, ren' : a.scan === 'pending' ? 'Skannes …' : 'Blokkert'}` : ''}</span>
       </span>
-    </span>
+    </>
   );
+  const cls = 'inline-flex items-center gap-2 rounded-lg border border-line bg-surface px-2 py-1.5 text-xs';
+  return href ? <a href={href} target="_blank" rel="noopener noreferrer" className={cx(cls, 'hover:border-brand/40 hover:bg-brand-soft/40')}>{inner}</a> : <span className={cls}>{inner}</span>;
 }
 
 function Message({ m }: { m: EmailMessage }) {
@@ -35,8 +63,8 @@ function Message({ m }: { m: EmailMessage }) {
           <time className="text-faint" dateTime={m.sentAt}>{fmtDateTime(m.sentAt)}</time>
         </header>
         <p className="break-anywhere mb-1 text-xs text-muted">Til: {m.to.map((t) => t.email).join(', ')} · <span className="font-semibold text-ink">{m.subject}</span></p>
-        <div className="whitespace-pre-wrap text-[13px] leading-relaxed">{m.body}</div>
-        {m.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{m.attachments.map((a) => <AttachmentChip key={a.id} a={a} />)}</div>}
+        <MailBody body={m.body} />
+        {m.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{m.attachments.map((a) => <AttachmentChip key={a.id} a={a} messageId={m.id} />)}</div>}
       </div>
       {out && (
         <div className="flex flex-wrap items-center justify-end gap-2 text-[11px]">
