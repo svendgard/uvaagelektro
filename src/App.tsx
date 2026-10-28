@@ -25,7 +25,7 @@ function Shell({ me, logout, refresh }: { me?: SessionUser; logout?: () => Promi
   const canConnect = me?.role === 'owner' && me.email.toLowerCase() === tenant.mail.mailbox.toLowerCase();
   const [caseId, setCaseId] = useState<string | null>(null);
   const [agentId, setAgentId] = useState<AgentId | null>(null);
-  const [filter, setFilter] = useState('open');
+  const [filter, setFilter] = useState('mine');
   const [sim, setSim] = useState(false);
   const nav: Nav = { openCase: setCaseId, openAgent: setAgentId, go: (v) => setView(v as View) };
   const pending = state.drafts.filter((d) => d.state === 'pending' || d.state === 'approved').length;
