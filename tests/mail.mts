@@ -327,6 +327,22 @@ assert.ok(st8.drafts.some((d: any) => d.caseId === mk.json.caseId && d.state ===
 assert.ok(st8.activities.some((a: any) => a.text.includes('gjorde e-posten fra')));
 ok('E-post åpnes direkte fra Microsoft. Eieren kan gjøre den om til sak med utkast, én gang.');
 
+// 10e. «Ikke en sak»: saken fjernes, e-posten ligger igjen som sortert bort og kan gjøres om til sak igjen
+const madeId = mk.json.caseId;
+assert.equal((await sa.req('POST', `/api/cases/${madeId}/not-a-case`)).status, 403);
+assert.equal((await espen.req('POST', `/api/cases/${s1.cases[0].id}/not-a-case`)).status, 409, 'sak med sendt svar kan ikke flyttes bort');
+assert.equal((await espen.req('POST', `/api/cases/${madeId}/not-a-case`)).status, 200);
+const st9 = (await espen.req('GET', '/api/state')).json;
+assert.ok(!st9.cases.some((c: any) => c.id === madeId), 'saken er borte');
+const i1 = st9.inbox.find((x: any) => x.id === 'i1');
+assert.equal(i1.decision, 'ignored'); assert.equal(i1.reason, 'Flyttet bort av Espen'); assert.equal(i1.caseId, undefined);
+assert.ok(!(await pg.query(`SELECT 1 FROM mail_messages WHERE graph_id = 'i1'`)).rows.length, 'lagret innhold slettet');
+assert.ok(!(await pg.query(`SELECT 1 FROM drafts WHERE case_id = $1`, [madeId])).rows.length, 'utkast slettet');
+assert.ok(!st9.activities.some((a: any) => a.text.includes('gjorde e-posten fra Kollega')), 'personopplysninger i loggen fjernet');
+const again = await espen.req('POST', '/api/inbox/i1/case');
+assert.equal(again.status, 200); assert.notEqual(again.json.caseId, madeId);
+ok('«Ikke en sak»: bare eieren, ikke når svar er sendt, saken fjernes og e-posten kan gjøres om til sak igjen');
+
 // 11. Synkroniseringsrunder registreres for helserapportering
 const lastRun = await mail.latestDeliveredRun();
 assert.ok(lastRun && lastRun.scan_run_id.startsWith('mail-sync-') && lastRun.persisted_at);
@@ -340,5 +356,5 @@ assert.equal(st.status, 'reconnect_required'); assert.equal(st.connected, false)
 assert.equal(await mail.syncOnce(), null);
 ok('Utløpt Microsoft-tilkobling oppdages og vises. Synk stopper uten å krasje.');
 
-console.log(`\n${pass} av 19 tester bestått`);
+console.log(`\n${pass} av 20 tester bestått`);
 process.exit(0);

@@ -475,6 +475,10 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
       update((s) => ({ ...s, cases: s.cases.filter((x) => x.id !== caseId) }));
       void call(`/api/cases/${caseId}`, undefined, `Kundedata for ${c.number} er slettet.`, 'DELETE');
     },
+    notACase: async (caseId: string): Promise<boolean> => {
+      const ok = await call(`/api/cases/${caseId}/not-a-case`, {}, 'Flyttet til «Sortert bort». Saken er fjernet.');
+      return ok;
+    },
     makeCase: async (graphId: string): Promise<string | null> => {
       try {
         const r = await api<{ caseId: string }>(`/api/inbox/${encodeURIComponent(graphId)}/case`, { body: {} });
@@ -537,6 +541,20 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
     actions: {
       ...jobs, approveAndSend, approveDraft, saveApproved, sendApproved, translateDraft, rejectDraft, regenerate, requestDraft, sendManual, moveCase, setPriority, markRead, resolveFlag, simulateInbound, simulateCustomerReply, exportCase, deleteCaseData, setRole, failNextSend, reset, toast,
       makeCase: async (_graphId: string): Promise<string | null> => { toast('Ikke tilgjengelig i demo.', 'neutral'); return null; },
+      notACase: async (caseId: string): Promise<boolean> => {
+        const c = ref.current.cases.find((x) => x.id === caseId);
+        if (!c) return false;
+        const first = ref.current.messages.filter((m) => m.threadId === c.threadId && m.direction === 'inbound').sort((a, b) => a.sentAt.localeCompare(b.sentAt))[0];
+        update((s) => ({
+          ...s,
+          cases: s.cases.filter((x) => x.id !== caseId),
+          messages: s.messages.filter((m) => m.threadId !== c.threadId),
+          drafts: s.drafts.filter((d) => d.caseId !== caseId),
+          ignored: first ? [{ message: { ...first, body: '' }, reason: `Flyttet bort av ${owner.firstName}` }, ...s.ignored] : s.ignored,
+        }));
+        toast('Flyttet til «Sortert bort». Saken er fjernet.', 'success');
+        return true;
+      },
       connectMail: async () => {}, disconnectMail: async () => true, setSending: async (_: boolean) => true, syncNow: async () => true, refresh,
       ...remoteActions,
     },
