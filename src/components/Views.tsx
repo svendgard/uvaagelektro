@@ -1,9 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { api } from '../lib/api';
+import { AttachmentChip, MailBody } from './CaseDetail';
 import { MailConnectionCard } from './MailConnection';
 import { previewText } from '../lib/cleanMail';
 import { useStore } from '../state/store';
 import { AUTOMATION_LEVELS } from '../config/tenant';
-import type { UserRole } from '../domain/types';
+import type { InboxItem, UserRole } from '../domain/types';
 import { ActivityFeed } from './Dashboard';
 import { CaseStatusBadge, Icon, Modal, Portrait } from './ui';
 import { cx, fmtDateTime, fmtRelative, kr } from '../lib/util';
@@ -11,64 +13,144 @@ import * as demoData from '../data/demoState';
 import { DEMO } from '../demo';
 const SIMULATION_TEMPLATES = DEMO ? demoData.SIMULATION_TEMPLATES : [];
 
+type InboxFilter = 'all' | 'case' | 'ignored' | 'internal';
+const DECISION_META: Record<InboxItem['decision'], { label: string; tone: string }> = {
+  case: { label: 'Sak', tone: 'bg-brand-soft text-brand' },
+  ignored: { label: 'Sortert bort', tone: 'bg-sunk text-muted' },
+  internal: { label: 'Intern', tone: 'bg-info-soft text-info' },
+  self: { label: 'Fra deg selv', tone: 'bg-violet-soft text-violet' },
+};
+
+/** E-post som ikke er sak: hentes direkte fra Microsoft og vises her. Kan gjøres om til sak. */
+function InboxMailDialog({ item, onClose, openCase }: { item: InboxItem | null; onClose: () => void; openCase: (id: string) => void }) {
+  const { state, actions } = useStore();
+  const [data, setData] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setData(null); setError(null);
+    if (!item || DEMO) return;
+    let alive = true;
+    api(`/api/inbox/${encodeURIComponent(item.id)}`).then((r) => { if (alive) setData(r); }).catch((e) => { if (alive) setError(e instanceof Error ? e.message : 'Kunne ikke hente e-posten.'); });
+    return () => { alive = false; };
+  }, [item?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!item) return null;
+  const meta = DECISION_META[item.decision];
+  const canAct = state.role === 'owner';
+  return (
+    <Modal open onClose={onClose} title={item.subject || '(uten emne)'} wide>
+      <div className="flex flex-col gap-3 p-4 sm:p-5">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className={cx('rounded-full px-2 py-0.5 font-bold', meta.tone)}>{meta.label}</span>
+          {item.reason && item.decision !== 'case' && <span className="text-muted">{item.reason}</span>}
+        </div>
+        <div className="rounded-xl border border-line bg-surface px-4 py-3">
+          <header className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-xs">
+            <span className="break-anywhere min-w-0"><b className="text-[13px] text-ink">{item.from.name}</b> <span className="text-muted">&lt;{item.from.email}&gt;</span></span>
+            <time className="text-faint" dateTime={item.receivedAt}>{fmtDateTime(item.receivedAt)}</time>
+          </header>
+          {DEMO ? <p className="text-[13px] text-muted">Innholdet hentes fra Microsoft når e-posten er koblet til.</p>
+            : error ? <p className="text-[13px] text-bad">{error}</p>
+            : !data ? <p className="text-[13px] text-muted">Henter e-posten …</p>
+            : <>
+                {data.to?.length > 0 && <p className="break-anywhere mb-1 text-xs text-muted">Til: {data.to.map((t: any) => t.email).join(', ')}{data.cc?.length ? ` · Kopi: ${data.cc.map((t: any) => t.email).join(', ')}` : ''}</p>}
+                <MailBody body={data.body} />
+                {data.attachments?.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{data.attachments.map((a: any) => <AttachmentChip key={a.id} a={a} href={`/api/inbox/${encodeURIComponent(item.id)}/attachments/${encodeURIComponent(a.id)}`} />)}</div>}
+              </>}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {item.caseId
+            ? <button className="btn btn-primary" onClick={() => { onClose(); openCase(item.caseId!); }}><Icon name="arrow" />Åpne sak {item.caseNumber}</button>
+            : <button className="btn btn-accent" disabled={busy || !canAct || DEMO} onClick={async () => { setBusy(true); const id = await actions.makeCase(item.id); setBusy(false); if (id) { onClose(); openCase(id); } }}>
+                <Icon name="plus" />{busy ? 'Oppretter sak …' : 'Gjør om til sak'}
+              </button>}
+          <button className="btn btn-ghost" onClick={onClose}>Lukk</button>
+        </div>
+        {!item.caseId && <p className="text-[11px] text-muted">Som sak får e-posten et svarforslag fra AIOliver, og den følges opp som andre saker. Ingenting sendes uten at du godkjenner.</p>}
+      </div>
+    </Modal>
+  );
+}
+
 export function InboxView({ openCase }: { openCase: (id: string) => void }) {
   const { state, tenant } = useStore();
-  const [tab, setTab] = useState<'cases' | 'ignored'>('cases');
-  const inbound = useMemo(() => state.messages.filter((m) => m.direction === 'inbound').sort((a, b) => b.sentAt.localeCompare(a.sentAt)), [state.messages]);
-  const caseByThread = new Map(state.cases.map((c) => [c.threadId, c]));
-  const emma = tenant.agents.find((a) => a.id === 'intake')!;
+  const [filter, setFilter] = useState<InboxFilter>('all');
+  const [open, setOpen] = useState<InboxItem | null>(null);
+  const caseByThread = useMemo(() => new Map(state.cases.map((c) => [c.threadId, c])), [state.cases]);
+
+  // Produksjon: listen fra serveren. Demo: bygges fra meldingene og det AIEmma sorterte bort.
+  const items: InboxItem[] = useMemo(() => {
+    if (!DEMO) return state.inbox;
+    const fromCases: InboxItem[] = state.messages.filter((m) => m.direction === 'inbound').map((m) => {
+      const c = caseByThread.get(m.threadId);
+      return { id: m.id, decision: 'case', reason: '', caseId: c?.id, caseNumber: c?.number, from: m.from, subject: m.subject, receivedAt: m.sentAt, hasAttachments: m.attachments.length > 0 };
+    });
+    const ignored: InboxItem[] = state.ignored.map(({ message: m, reason }) => ({ id: m.id, decision: 'ignored', reason, from: m.from, subject: m.subject, receivedAt: m.sentAt, hasAttachments: false }));
+    return [...fromCases, ...ignored].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
+  }, [state.inbox, state.messages, state.ignored, caseByThread]);
+
+  const counts = {
+    all: items.length,
+    case: items.filter((i) => i.decision === 'case').length,
+    ignored: items.filter((i) => i.decision === 'ignored').length,
+    internal: items.filter((i) => i.decision === 'internal' || i.decision === 'self').length,
+  };
+  const shown = items.filter((i) => filter === 'all' || i.decision === filter || (filter === 'internal' && i.decision === 'self'));
+  const tabs: { id: InboxFilter; label: string }[] = [
+    { id: 'all', label: 'Alle' }, { id: 'case', label: 'Saker' }, { id: 'ignored', label: 'Sortert bort' }, { id: 'internal', label: 'Interne' },
+  ];
+  const m = state.mail;
+  const status = DEMO ? 'Simulert innboks' : !m ? '' : m.connected ? `Tilkoblet${m.last_sync_at ? ` · sjekket ${fmtRelative(m.last_sync_at)}` : ''}` : 'Ikke koblet til';
+
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
+    <div className="mx-auto flex w-full max-w-4xl flex-col gap-3">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div className="min-w-0">
           <h1 className="font-display text-2xl font-semibold">Innboks</h1>
-          <p className="text-[13px] text-muted">Speiler {tenant.mail.mailbox}. Den vanlige e-postkontoen fungerer som før.</p>
+          <p className="break-anywhere text-[13px] text-muted">All e-post til {tenant.mail.mailbox}. Den vanlige e-posten i Outlook fungerer som før.</p>
         </div>
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-warn/40 bg-warn-soft px-3 py-1 text-xs font-semibold text-warn"><Icon name="plug" className="h-3.5 w-3.5" />{DEMO ? 'Simulert innboks · ingen ekte e-postkonto tilkoblet' : 'Ikke koblet til ennå'}</span>
+        {status && <span className={cx('inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold', !DEMO && m?.connected ? 'bg-ok-soft text-ok' : 'border border-warn/40 bg-warn-soft text-warn')}>
+          <span className={cx('h-1.5 w-1.5 rounded-full', !DEMO && m?.connected ? 'bg-ok' : 'bg-warn')} />{status}
+        </span>}
       </div>
-      <div className="flex gap-1.5">
-        <button onClick={() => setTab('cases')} className={cx('rounded-full border px-3 py-1 text-xs font-semibold', tab === 'cases' ? 'border-brand bg-brand text-surface' : 'border-line bg-surface text-muted')}>Kundehenvendelser <span className="tnum opacity-70">{inbound.filter((m) => caseByThread.has(m.threadId)).length}</span></button>
-        <button onClick={() => setTab('ignored')} className={cx('rounded-full border px-3 py-1 text-xs font-semibold', tab === 'ignored' ? 'border-brand bg-brand text-surface' : 'border-line bg-surface text-muted')}>Sortert bort av AIEmma <span className="tnum opacity-70">{state.ignored.length}</span></button>
+
+      <div className="grid grid-cols-4 gap-1 rounded-xl border border-line bg-surface p-1" role="tablist" aria-label="Filter">
+        {tabs.map((t) => (
+          <button key={t.id} role="tab" aria-selected={filter === t.id} onClick={() => setFilter(t.id)}
+            className={cx('flex min-w-0 flex-col items-center justify-center rounded-lg px-1 py-1.5 text-[12px] font-semibold leading-tight sm:flex-row sm:gap-1.5 sm:text-[13px]', filter === t.id ? 'bg-brand text-surface' : 'text-muted hover:text-ink')}>
+            <span className="max-w-full truncate">{t.label}</span><span className="tnum text-[11px] opacity-70">{counts[t.id]}</span>
+          </button>
+        ))}
       </div>
-      {tab === 'cases' ? (
-        <ul className="card divide-y divide-line">
-          {inbound.filter((m) => caseByThread.has(m.threadId)).map((m) => {
-            const c = caseByThread.get(m.threadId)!;
-            return (
-              <li key={m.id}>
-                <button onClick={() => openCase(c.id)} className="flex w-full flex-col gap-1 px-4 py-3 text-left hover:bg-sunk/60 sm:flex-row sm:items-center sm:gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <b className="text-[13px]">{m.from.name}</b>
-                      <span className="text-xs text-muted">{m.from.email}</span>
-                      {m.attachments.length > 0 && <span className="inline-flex items-center gap-0.5 text-xs text-muted"><Icon name="paperclip" className="h-3.5 w-3.5" />{m.attachments.length}</span>}
+
+      <div className="card overflow-hidden">
+        {shown.length === 0 ? <p className="px-4 py-10 text-center text-[13px] text-faint">{items.length ? 'Ingen e-poster i denne gruppen.' : 'Ingen e-post ennå. Nye e-poster dukker opp her innen et minutt.'}</p> : (
+          <ul className="divide-y divide-line">
+            {shown.map((i) => {
+              const meta = DECISION_META[i.decision];
+              return (
+                <li key={i.id}>
+                  <button onClick={() => (i.caseId && DEMO ? openCase(i.caseId) : setOpen(i))} className="flex w-full items-start gap-3 px-4 py-3 text-left hover:bg-sunk/60">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="truncate text-[13px] font-semibold">{i.from.name}</span>
+                        <span className="shrink-0 text-[11px] text-faint">{fmtRelative(i.receivedAt)}</span>
+                      </div>
+                      <p className="truncate text-[13px] text-ink">{i.subject || '(uten emne)'}</p>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <span className={cx('whitespace-nowrap rounded-full px-1.5 py-px text-[10px] font-bold leading-4', meta.tone)}>{i.decision === 'case' && i.caseNumber ? `Sak ${i.caseNumber}` : meta.label}</span>
+                        {i.decision === 'ignored' && i.reason && <span className="truncate text-[11px] text-muted">{i.reason}</span>}
+                        {i.hasAttachments && <Icon name="paperclip" className="h-3.5 w-3.5 text-faint" />}
+                      </div>
                     </div>
-                    <p className="truncate text-[13px]"><span className="font-semibold">{m.subject}</span> <span className="text-muted">· {previewText(m.body)}</span></p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-3">
-                    <span className="font-mono text-[11px] text-faint">{c.number}</span>
-                    <CaseStatusBadge status={c.status} short />
-                    <span className="w-24 text-right text-xs text-muted">{fmtRelative(m.sentAt)}</span>
-                  </div>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      ) : (
-        <div className="flex flex-col gap-3">
-          <p className="flex items-center gap-2 text-[13px] text-muted"><Portrait p={emma.portrait} size={28} aiBadge={false} />AIEmma har vurdert disse som ikke-kundehenvendelser. De blir liggende urørt i den vanlige innboksen.</p>
-          <ul className="card divide-y divide-line">
-            {state.ignored.map(({ message: m, reason }) => (
-              <li key={m.id} className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-center sm:gap-4">
-                <div className="min-w-0 flex-1"><b className="text-[13px]">{m.from.name}</b> <span className="text-xs text-muted">{m.from.email}</span><p className="truncate text-[13px] text-muted">{m.subject}</p></div>
-                <span className="rounded-full bg-sunk px-2 py-0.5 text-xs font-semibold text-muted">{reason}</span>
-                <span className="w-24 text-right text-xs text-muted">{fmtRelative(m.sentAt)}</span>
-              </li>
-            ))}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
-        </div>
-      )}
+        )}
+      </div>
+      <InboxMailDialog item={open} onClose={() => setOpen(null)} openCase={openCase} />
     </div>
   );
 }

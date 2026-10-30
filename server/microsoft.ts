@@ -125,6 +125,33 @@ export class Graph {
     return out;
   }
 
+  /** Innkommende e-post i alle mapper (unntatt de som oppgis), eldste først. */
+  async receivedSince(since: Date, excludeFolderIds: string[], maxPages = 5): Promise<(GraphMessage & { parentFolderId?: string })[]> {
+    const select = 'id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,hasAttachments,isDraft,body,parentFolderId';
+    let url: string | undefined = `/me/messages?$filter=receivedDateTime ge ${since.toISOString()}&$orderby=receivedDateTime asc&$top=50&$select=${select}`;
+    const out: (GraphMessage & { parentFolderId?: string })[] = [];
+    for (let page = 0; url && page < maxPages; page++) {
+      const r: { value: (GraphMessage & { parentFolderId?: string })[]; '@odata.nextLink'?: string } = await this.call('GET', url, undefined, { Prefer: 'outlook.body-content-type="text"' });
+      out.push(...r.value.filter((m) => !m.isDraft && !excludeFolderIds.includes(m.parentFolderId ?? '')));
+      url = r['@odata.nextLink'];
+    }
+    return out;
+  }
+
+  /** ID-ene til faste mapper (sendte, slettede, søppelpost, kladd, utboks). */
+  async wellKnownFolderIds(names: string[]): Promise<string[]> {
+    const ids: string[] = [];
+    for (const n of names) {
+      try { ids.push((await this.call<{ id: string }>('GET', `/me/mailFolders/${n}?$select=id`)).id); } catch { /* mappen finnes ikke */ }
+    }
+    return ids;
+  }
+
+  /** Én e-post med tekst, hentet direkte ved visning. */
+  message(id: string) {
+    return this.call<GraphMessage>('GET', `/me/messages/${encodeURIComponent(id)}?$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,isDraft,body`, undefined, { Prefer: 'outlook.body-content-type="text"' });
+  }
+
   async attachments(messageId: string) {
     const r = await this.call<{ value: { id: string; name: string; size: number; contentType: string; isInline: boolean }[] }>(
       'GET', `/me/messages/${encodeURIComponent(messageId)}/attachments?$select=id,name,size,contentType,isInline`);

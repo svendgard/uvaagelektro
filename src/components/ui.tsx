@@ -119,6 +119,7 @@ export function Icon({ name, className = 'h-4 w-4' }: { name: string; className?
     lock: 'M6 11h12v10H6zM8 11V7a4 4 0 018 0v4',
     send: 'M4 12l16-8-6 16-2-7z',
     arrow: 'M5 12h14M13 6l6 6-6 6',
+    plus: 'M12 5v14M5 12h14',
     back: 'M19 12H5M11 6l-6 6 6 6',
     clock: 'M12 21a9 9 0 100-18 9 9 0 000 18zM12 7v5l3 2',
     sparkle: 'M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z',

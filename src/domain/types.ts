@@ -305,3 +305,16 @@ export interface Job {
   acceptedAt: string;
   thread: ChatMessage[];
 }
+
+/** Én innkommende e-post i innboksen, uansett om den ble sak. Innhold hentes ved visning. */
+export interface InboxItem {
+  id: string;
+  decision: 'case' | 'ignored' | 'internal' | 'self';
+  reason: string;
+  caseId?: string;
+  caseNumber?: string;
+  from: { name: string; email: string };
+  subject: string;
+  receivedAt: string;
+  hasAttachments: boolean;
+}

@@ -10,7 +10,7 @@ import { cx, fmtDateTime, kr } from '../lib/util';
 import { cleanMail, linkify } from '../lib/cleanMail';
 
 /** Ren e-posttekst: bannere, plassholdere og sitert historikk ryddes bort. Lenker vises kort og klikkbart. */
-function MailBody({ body }: { body: string }) {
+export function MailBody({ body }: { body: string }) {
   const { text, quoted } = useMemo(() => cleanMail(body), [body]);
   const [showQuoted, setShowQuoted] = useState(false);
   const render = (t: string) => linkify(t).map((p, i) => 'href' in p
@@ -31,8 +31,8 @@ function MailBody({ body }: { body: string }) {
   );
 }
 
-function AttachmentChip({ a, messageId }: { a: Attachment; messageId: string }) {
-  const href = DEMO ? undefined : `/api/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(a.id)}`;
+export function AttachmentChip({ a, messageId, href: hrefOverride }: { a: Attachment; messageId?: string; href?: string }) {
+  const href = DEMO ? undefined : hrefOverride ?? (messageId ? `/api/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(a.id)}` : undefined);
   const showThumb = !!href && a.kind === 'image' && /jpe?g|png|gif|webp/i.test(a.mimeType);
   const size = a.sizeKb >= 1024 ? `${(a.sizeKb / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(a.sizeKb))} kB`;
   const inner = (

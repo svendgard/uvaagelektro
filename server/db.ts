@@ -226,6 +226,23 @@ ALTER TABLE drafts ADD COLUMN IF NOT EXISTS feedback text;
 ALTER TABLE drafts ADD COLUMN IF NOT EXISTS rewritten boolean NOT NULL DEFAULT false
 `,
   },
+  {
+    // All innkommende e-post skal være synlig: avsender, emne og hva som skjedde. Innhold lagres bare for saker.
+    version: 5,
+    sql: `
+ALTER TABLE triage_log ADD COLUMN IF NOT EXISTS from_name text;
+ALTER TABLE triage_log ADD COLUMN IF NOT EXISTS from_email text;
+ALTER TABLE triage_log ADD COLUMN IF NOT EXISTS subject text;
+ALTER TABLE triage_log ADD COLUMN IF NOT EXISTS received_at timestamptz;
+ALTER TABLE triage_log ADD COLUMN IF NOT EXISTS case_id uuid;
+ALTER TABLE triage_log ADD COLUMN IF NOT EXISTS has_attachments boolean NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS triage_log_received ON triage_log(tenant_id, received_at DESC);
+INSERT INTO triage_log(tenant_id, graph_id, decision, reason, sender_domain, at, from_name, from_email, subject, received_at, case_id, has_attachments)
+  SELECT m.tenant_id, m.graph_id, 'case', '', split_part(m.from_addr->>'email', '@', 2), m.sent_at, m.from_addr->>'name', m.from_addr->>'email', m.subject, m.sent_at, m.case_id, jsonb_array_length(m.attachments) > 0
+  FROM mail_messages m WHERE m.direction = 'inbound' AND m.graph_id IS NOT NULL
+  ON CONFLICT DO NOTHING
+`,
+  },
 ];
 
 export async function migrate(db: Db): Promise<void> {

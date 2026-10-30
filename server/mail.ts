@@ -5,7 +5,7 @@ import type { Env, Helpers } from './app';
 import type { TenantConfig } from '../src/config/tenant';
 import { decryptSecret, encryptSecret } from './auth/totp';
 import { newToken, sha256 } from './auth/crypto';
-import { Graph, MsAuthError, addr, authorizeUrl, exchangeCode, idTokenClaims, pkce, refreshTokens, type Fetch, type GraphMessage, type MsConfig } from './microsoft';
+import { Graph, GraphError, MsAuthError, addr, authorizeUrl, exchangeCode, idTokenClaims, pkce, refreshTokens, type Fetch, type GraphMessage, type MsConfig } from './microsoft';
 import { cleanMail } from '../src/lib/cleanMail';
 import { draftReply, translate, triage, LANGS, type AiConfig, type InMail, type Lang } from './ai';
 
@@ -47,6 +47,7 @@ export function createMail(d: MailDeps) {
   const f = d.fetch ?? fetch;
   let syncing = false;
   let backfilled = false;
+  let excludeFolders: string[] | undefined;
 
   const activity = (actor: string, text: string, caseId?: string | null, tone?: string) =>
     db.query('INSERT INTO activities(tenant_id, at, actor, case_id, text, tone) VALUES ($1,$2,$3,$4,$5,$6)', [tenantId, new Date(now()), actor, caseId ?? null, text, tone ?? null]);
@@ -137,6 +138,36 @@ export function createMail(d: MailDeps) {
     return r.rows.length > 0;
   }
 
+  /** Registrerer hver innkommende e-post (avsender, emne, hva som skjedde). Innholdet lagres bare for saker. */
+  async function logItem(m: GraphMessage, decision: 'case' | 'ignored' | 'internal' | 'self', reason: string, caseId: string | null = null) {
+    const from = addr(m.from);
+    await db.query(`INSERT INTO triage_log(tenant_id, graph_id, decision, reason, sender_domain, at, from_name, from_email, subject, received_at, case_id, has_attachments)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      ON CONFLICT (tenant_id, graph_id) DO UPDATE SET decision = EXCLUDED.decision, reason = EXCLUDED.reason, case_id = EXCLUDED.case_id`,
+      [tenantId, m.id, decision, reason.slice(0, 200), from.email.split('@')[1] ?? '', new Date(now()), from.name.slice(0, 200), from.email.slice(0, 200),
+        (m.subject ?? '').slice(0, 300), new Date(m.receivedDateTime), caseId, !!m.hasAttachments || hasInlineImages(m.body?.content ?? '')]);
+  }
+
+  /** Oppretter sak fra en e-post: sak, melding, utkast og logg. */
+  async function caseFromMessage(m: GraphMessage, t: Awaited<ReturnType<typeof triage>>, atts: Awaited<ReturnType<typeof attachmentsFor>>, manualBy?: string) {
+    const id = randomUUID();
+    const flagged = t.urgent.is_urgent ? { reason: t.urgent.reason || 'Mulig sikkerhetsrisiko. Ring kunden.' }
+      : t.injection_suspected ? { reason: 'E-posten inneholder tekst som prøver å styre agentene. Behandlet som vanlig tekst.' } : null;
+    await db.query(`INSERT INTO cases(id, tenant_id, number, conversation_id, title, status, priority, job_type, customer, description, summary, next_action, missing_info, flagged, assigned_agent, unread, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,'ai_processing',$6,$7,$8,$9,$10,$11,$12,$13,'intake',true,$14,$14)`,
+      [id, tenantId, await nextNumber(), m.conversationId, `${t.title} – ${t.customer.name}`.slice(0, 160), t.urgent.is_urgent ? 'urgent' : t.priority, t.job_type,
+        JSON.stringify({ name: t.customer.name, email: t.customer.email, phone: t.customer.phone, address: t.customer.address, company: t.customer.company, orgNr: t.customer.org_nr, type: t.customer.company ? 'naering' : 'privat' }),
+        (m.subject ?? '').slice(0, 300), t.summary, 'AIOliver lager svarutkast.', JSON.stringify(t.missing_info), flagged ? JSON.stringify(flagged) : null, new Date(now())]);
+    await insertMessage(id, m, 'inbound', atts);
+    await logItem(m, 'case', '', id);
+    await activity(manualBy ? 'owner' : 'intake', manualBy
+      ? `${tenant.owner.firstName} gjorde e-posten fra ${t.customer.name} om til en sak.`
+      : `AIEmma registrerte ny henvendelse fra ${t.customer.name}${t.engine === 'regler' ? ' (enkle regler)' : ''}.`, id);
+    if (flagged) await activity('coordinator', `AIHenrik: ${flagged.reason}`, id, 'danger');
+    await createDraft(id);
+    return id;
+  }
+
   /** Én synkroniseringsrunde. Returnerer null hvis den ikke kjørte. */
   async function syncOnce(): Promise<{ runId: string; fetched: number; newCases: number; error?: string } | null> {
     if (syncing) return null;
@@ -166,44 +197,43 @@ export function createMail(d: MailDeps) {
       // ── Innboks ──
       const inboxSince = conn.inbox_watermark ? new Date(conn.inbox_watermark) : new Date(new Date(conn.connected_at).getTime() - (d.initialSyncDays ?? 3) * 864e5);
       let watermark = inboxSince;
-      const inbox = (await g.messagesSince('inbox', inboxSince)).filter((m) => !m.isDraft);
+      // Alle mapper unntatt sendte, slettede, søppelpost, kladd og utboks (fanger også e-post som Outlook-regler flytter).
+      excludeFolders ??= await g.wellKnownFolderIds(['sentitems', 'deleteditems', 'junkemail', 'drafts', 'outbox']);
+      const inbox = await g.receivedSince(inboxSince, excludeFolders);
       fetched += inbox.length;
+      const ownDomain = mailbox.split('@')[1] ?? '';
       for (const m of inbox) {
         if (processed >= (d.maxPerRun ?? 25)) break;
-        if (await seen(m.id)) { watermark = new Date(Math.max(watermark.getTime(), Date.parse(m.receivedDateTime))); continue; }
+        const bump = () => { watermark = new Date(Math.max(watermark.getTime(), Date.parse(m.receivedDateTime))); };
+        if (await seen(m.id)) { bump(); continue; }
         const from = addr(m.from);
-        if (from.email === mailbox) { watermark = new Date(Math.max(watermark.getTime(), Date.parse(m.receivedDateTime))); continue; }
+        const recipients = [...(m.toRecipients ?? []), ...(m.ccRecipients ?? [])].map((r) => addr(r).email);
+        // Egen e-post som ikke er sendt til seg selv (f.eks. kopi av eget svar) hoppes over.
+        if (from.email === mailbox && !recipients.includes(mailbox)) { bump(); continue; }
         processed++;
         const existing = (await db.query<{ id: string; status: string }>('SELECT id, status FROM cases WHERE tenant_id = $1 AND conversation_id = $2 ORDER BY created_at DESC LIMIT 1', [tenantId, m.conversationId])).rows[0];
-        if (existing) {
+        if (existing && from.email !== mailbox) {
           await insertMessage(existing.id, m, 'inbound', await attachmentsFor(m));
+          await logItem(m, 'case', '', existing.id);
           await db.query(`UPDATE cases SET unread = true, updated_at = $2 WHERE id = $1`, [existing.id, new Date(now())]);
           await activity('customer', `${from.name || from.email} svarte i saken.`, existing.id);
           if (!['won', 'lost'].includes(existing.status)) await createDraft(existing.id);
+        } else if (from.email === mailbox) {
+          await logItem(m, 'self', 'Sendt fra deg selv');
+        } else if (ownDomain && from.email.endsWith(`@${ownDomain}`)) {
+          await logItem(m, 'internal', 'Intern e-post'); // ikke sendt til AI
         } else {
           const atts = await attachmentsFor(m);
           const mail: InMail = { fromName: from.name, fromEmail: from.email, subject: m.subject ?? '', body: cleanMail(m.body?.content ?? '').text || (m.body?.content ?? ''), receivedAt: m.receivedDateTime, attachments: atts.map((a) => a.filename) };
           const t = await triage(d.ai, tenant, mail);
           if (!t.is_customer_inquiry) {
-            await db.query('INSERT INTO triage_log(tenant_id, graph_id, decision, reason, sender_domain, at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING',
-              [tenantId, m.id, 'ignored', t.reason.slice(0, 200), from.email.split('@')[1] ?? '', new Date(now())]);
+            await logItem(m, 'ignored', t.reason);
           } else {
-            const id = randomUUID();
-            const flagged = t.urgent.is_urgent ? { reason: t.urgent.reason || 'Mulig sikkerhetsrisiko. Ring kunden.' }
-              : t.injection_suspected ? { reason: 'E-posten inneholder tekst som prøver å styre agentene. Behandlet som vanlig tekst.' } : null;
-            await db.query(`INSERT INTO cases(id, tenant_id, number, conversation_id, title, status, priority, job_type, customer, description, summary, next_action, missing_info, flagged, assigned_agent, unread, created_at, updated_at)
-              VALUES ($1,$2,$3,$4,$5,'ai_processing',$6,$7,$8,$9,$10,$11,$12,$13,'intake',true,$14,$14)`,
-              [id, tenantId, await nextNumber(), m.conversationId, `${t.title} – ${t.customer.name}`.slice(0, 160), t.urgent.is_urgent ? 'urgent' : t.priority, t.job_type,
-                JSON.stringify({ name: t.customer.name, email: t.customer.email, phone: t.customer.phone, address: t.customer.address, company: t.customer.company, orgNr: t.customer.org_nr, type: t.customer.company ? 'naering' : 'privat' }),
-                (m.subject ?? '').slice(0, 300), t.summary, 'AIOliver lager svarutkast.', JSON.stringify(t.missing_info), flagged ? JSON.stringify(flagged) : null, new Date(now())]);
-            await insertMessage(id, m, 'inbound', atts);
+            await caseFromMessage(m, t, atts);
             newCases++;
-            await activity('intake', `AIEmma registrerte ny henvendelse fra ${t.customer.name}${t.engine === 'regler' ? ' (enkle regler)' : ''}.`, id);
-            if (flagged) await activity('coordinator', `AIHenrik: ${flagged.reason}`, id, 'danger');
-            await createDraft(id);
           }
         }
-        watermark = new Date(Math.max(watermark.getTime(), Date.parse(m.receivedDateTime)));
+        bump();
       }
       // ── Sendte: svar Espen har sendt fra Outlook (eller fra oss) knyttes til saken ──
       const sentSince = conn.sent_watermark ? new Date(conn.sent_watermark) : inboxSince;
@@ -360,6 +390,8 @@ export function createMail(d: MailDeps) {
     const drafts = ids.length ? (await db.query<any>('SELECT * FROM drafts WHERE case_id = ANY($1::uuid[]) ORDER BY created_at', [ids])).rows : [];
     const acts = (await db.query<any>('SELECT * FROM activities WHERE tenant_id = $1 ORDER BY at DESC LIMIT 400', [tenantId])).rows;
     const ignored = (await db.query<any>(`SELECT graph_id, reason, sender_domain, at FROM triage_log WHERE tenant_id = $1 AND decision = 'ignored' ORDER BY at DESC LIMIT 30`, [tenantId])).rows;
+    const inbox = (await db.query<any>(`SELECT t.*, c.number AS case_number FROM triage_log t LEFT JOIN cases c ON c.id = t.case_id
+      WHERE t.tenant_id = $1 ORDER BY COALESCE(t.received_at, t.at) DESC LIMIT 300`, [tenantId])).rows;
     const iso = (v: any) => new Date(v).toISOString();
     return {
       cases: cases.map((c) => ({
@@ -382,6 +414,11 @@ export function createMail(d: MailDeps) {
         error: x.error ?? undefined, rewritten: !!x.rewritten, feedback: x.feedback ?? undefined,
       })),
       activities: acts.slice(0, 120).map((a) => ({ id: String(a.id), at: iso(a.at), actor: a.actor, caseId: a.case_id ?? undefined, text: a.text, tone: a.tone ?? undefined })),
+      inbox: inbox.map((i) => ({
+        id: i.graph_id, decision: i.decision, reason: i.reason ?? '', caseId: i.case_id && i.case_number ? i.case_id : undefined, caseNumber: i.case_number ?? undefined,
+        from: { name: i.from_name || i.from_email || i.sender_domain || 'Ukjent avsender', email: i.from_email || '' },
+        subject: i.subject ?? '(emne ikke registrert)', receivedAt: iso(i.received_at ?? i.at), hasAttachments: !!i.has_attachments,
+      })),
       ignored: ignored.map((i) => ({ message: { id: i.graph_id, threadId: '', direction: 'inbound', from: { name: i.sender_domain, email: i.sender_domain }, to: [], subject: '(innhold lagres ikke)', body: '', sentAt: iso(i.at), attachments: [] }, reason: i.reason })),
     };
   }
@@ -418,13 +455,10 @@ export function createMail(d: MailDeps) {
     // Vedlegg hentes direkte fra Microsoft ved visning (lagres ikke hos oss).
     // Bare bilder vises i nettleseren; alt annet lastes ned. Ingen aktivt innhold (HTML/SVG) kjøres på vårt domene.
     const SAFE_INLINE = /^image\/(jpeg|png|gif|webp|heic|heif)$/i;
-    app.get('/api/messages/:id/attachments/:attId', async (c) => {
-      const m = (await db.query<any>('SELECT graph_id, attachments FROM mail_messages WHERE id = $1 AND tenant_id = $2', [c.req.param('id'), tenantId])).rows[0];
-      const a = m?.graph_id ? (m.attachments ?? []).find((x: any) => x.id === c.req.param('attId')) : null;
-      if (!a) return h.err(c, 404, 'Fant ikke vedlegget.');
-      if (a.sizeKb > 30 * 1024) return h.err(c, 409, 'Vedlegget er for stort til å vises her. Åpne det i Outlook.');
+    const serveAttachment = async (c: Context<Env>, graphId: string, a: { id: string; filename?: string; mimeType?: string; sizeKb?: number }) => {
+      if ((a.sizeKb ?? 0) > 30 * 1024) return h.err(c, 409, 'Vedlegget er for stort til å vises her. Åpne det i Outlook.');
       try {
-        const { bytes } = await graph().attachmentBytes(m.graph_id, a.id);
+        const { bytes } = await graph().attachmentBytes(graphId, a.id);
         const type = String(a.mimeType || 'application/octet-stream').toLowerCase();
         const inline = SAFE_INLINE.test(type) || type === 'application/pdf';
         const name = String(a.filename || 'vedlegg').replace(/["\\\r\n]/g, '_');
@@ -438,6 +472,75 @@ export function createMail(d: MailDeps) {
       } catch (e) {
         log('warn', 'Kunne ikke hente vedlegg', { error: String(e) });
         return h.err(c, 502, 'Kunne ikke hente vedlegget fra Microsoft. Prøv igjen.');
+      }
+    };
+
+    app.get('/api/messages/:id/attachments/:attId', async (c) => {
+      const m = (await db.query<any>('SELECT graph_id, attachments FROM mail_messages WHERE id = $1 AND tenant_id = $2', [c.req.param('id'), tenantId])).rows[0];
+      const a = m?.graph_id ? (m.attachments ?? []).find((x: any) => x.id === c.req.param('attId')) : null;
+      if (!a) return h.err(c, 404, 'Fant ikke vedlegget.');
+      return serveAttachment(c, m.graph_id, a);
+    });
+
+    // ── Innboks: all innkommende e-post. Innhold for e-post som ikke er sak hentes direkte fra Microsoft ved visning. ──
+    app.use('/api/inbox/*', h.requireUser);
+    const inboxItem = async (graphId: string) => (await db.query<any>('SELECT * FROM triage_log WHERE tenant_id = $1 AND graph_id = $2', [tenantId, graphId])).rows[0];
+
+    app.get('/api/inbox/:id', async (c) => {
+      const item = await inboxItem(c.req.param('id'));
+      if (!item) return h.err(c, 404, 'Fant ikke e-posten.');
+      try {
+        const m = await graph().message(item.graph_id);
+        const atts = await attachmentsFor(m);
+        return c.json({
+          id: item.graph_id, decision: item.decision, reason: item.reason, caseId: item.case_id ?? undefined,
+          from: addr(m.from), to: (m.toRecipients ?? []).map(addr), cc: (m.ccRecipients ?? []).map(addr),
+          subject: m.subject ?? '', receivedAt: m.receivedDateTime, body: m.body?.content ?? '',
+          attachments: atts,
+        });
+      } catch (e) {
+        log('warn', 'Kunne ikke hente e-post', { error: String(e) });
+        const gone = e instanceof GraphError && e.status === 404;
+        return h.err(c, gone ? 404 : 502, gone ? 'E-posten er slettet eller flyttet i Outlook.' : 'Kunne ikke hente e-posten fra Microsoft. Prøv igjen.');
+      }
+    });
+
+    app.get('/api/inbox/:id/attachments/:attId', async (c) => {
+      const item = await inboxItem(c.req.param('id'));
+      if (!item) return h.err(c, 404, 'Fant ikke e-posten.');
+      try {
+        const a = (await graph().attachments(item.graph_id)).find((x) => x.id === c.req.param('attId'));
+        if (!a) return h.err(c, 404, 'Fant ikke vedlegget.');
+        return serveAttachment(c, item.graph_id, { id: a.id, filename: a.name, mimeType: a.contentType, sizeKb: Math.round(a.size / 1024) });
+      } catch { return h.err(c, 502, 'Kunne ikke hente vedlegget fra Microsoft. Prøv igjen.'); }
+    });
+
+    // Eieren gjør en e-post om til sak (overstyrer AIEmma). Svar i en eksisterende sakstråd legges i den saken.
+    app.post('/api/inbox/:id/case', async (c) => {
+      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan opprette saker.');
+      const item = await inboxItem(c.req.param('id'));
+      if (!item) return h.err(c, 404, 'Fant ikke e-posten.');
+      if (item.decision === 'case' && item.case_id) return c.json({ ok: true, caseId: item.case_id });
+      try {
+        const m = await graph().message(item.graph_id);
+        const atts = await attachmentsFor(m);
+        const existing = (await db.query<{ id: string }>('SELECT id FROM cases WHERE tenant_id = $1 AND conversation_id = $2 ORDER BY created_at DESC LIMIT 1', [tenantId, m.conversationId])).rows[0];
+        if (existing) {
+          await insertMessage(existing.id, m, 'inbound', atts);
+          await logItem(m, 'case', '', existing.id);
+          await activity('owner', `${tenant.owner.firstName} la e-posten «${(m.subject ?? '').slice(0, 80)}» til saken.`, existing.id);
+          await createDraft(existing.id);
+          return c.json({ ok: true, caseId: existing.id });
+        }
+        const from = addr(m.from);
+        const mail: InMail = { fromName: from.name, fromEmail: from.email, subject: m.subject ?? '', body: cleanMail(m.body?.content ?? '').text || (m.body?.content ?? ''), receivedAt: m.receivedDateTime, attachments: atts.map((a) => a.filename) };
+        const t = await triage(d.ai, tenant, mail, { force: true });
+        const caseId = await caseFromMessage(m, { ...t, is_customer_inquiry: true }, atts, user(c).email);
+        await h.audit(user(c), 'case.created_manual', item.graph_id);
+        return c.json({ ok: true, caseId });
+      } catch (e) {
+        log('warn', 'Kunne ikke gjøre e-post om til sak', { error: String(e) });
+        return h.err(c, 502, `Kunne ikke opprette saken: ${e instanceof Error ? e.message : String(e)}`);
       }
     });
 
