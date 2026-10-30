@@ -298,8 +298,10 @@ export function CaseDetail({ caseId, onClose }: { caseId: string | null; onClose
   const [compose, setCompose] = useState(false);
   const [tab, setTab] = useState<'job' | 'mail'>('job');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmNotCase, setConfirmNotCase] = useState(false);
+  const [movingOut, setMovingOut] = useState(false);
   const [exported, setExported] = useState<string | null>(null);
-  useEffect(() => { setTab('job'); setCompose(false); setConfirmDelete(false); setExported(null); if (caseId && c?.unreadCustomerReply) actions.markRead(caseId); }, [caseId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setTab('job'); setCompose(false); setConfirmDelete(false); setConfirmNotCase(false); setExported(null); if (caseId && c?.unreadCustomerReply) actions.markRead(caseId); }, [caseId]); // eslint-disable-line react-hooks/exhaustive-deps
   const thread = useMemo(() => c ? state.messages.filter((m) => m.threadId === c.threadId).sort((a, b) => a.sentAt.localeCompare(b.sentAt)) : [], [c, state.messages]);
   if (!caseId) return null;
   if (!c) return <Modal open onClose={onClose} title="Sak"><p className="p-5 text-muted">Saken finnes ikke lenger.</p></Modal>;
@@ -310,6 +312,8 @@ export function CaseDetail({ caseId, onClose }: { caseId: string | null; onClose
   const canQuote = c.status === 'ready_for_quote';
   const canFollow = c.status === 'follow_up' || c.status === 'quote_sent';
   const waitingCustomer = c.status === 'awaiting_customer' || c.status === 'quote_sent' || c.status === 'follow_up';
+  // «Ikke en sak» bare når ingenting er sendt til kunden; ellers brukes «Avsluttet».
+  const canMoveOut = state.role === 'owner' && !c.job && !thread.some((m) => m.direction === 'outbound') && !state.drafts.some((d) => d.caseId === c.id && (d.state === 'sending' || d.state === 'sent'));
 
   return (
     <Modal open onClose={onClose} title={`${c.number} · ${c.customer.name}`} wide>
@@ -324,7 +328,21 @@ export function CaseDetail({ caseId, onClose }: { caseId: string | null; onClose
             {(Object.keys(PRIORITY_META) as Priority[]).map((p) => <option key={p} value={p}>Prioritet: {PRIORITY_META[p].label}</option>)}
           </select>
           <span className="text-xs text-muted">{tenant.jobTypes[c.jobType].label} · opprettet {fmtDateTime(c.createdAt)}</span>
+          {canMoveOut && !confirmNotCase && (
+            <button className="ml-auto inline-flex items-center gap-1 rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold text-muted hover:text-ink" onClick={() => setConfirmNotCase(true)}>
+              <Icon name="x" className="h-3.5 w-3.5" />Ikke en sak
+            </button>
+          )}
         </div>
+        {confirmNotCase && (
+          <div className="flex flex-col gap-2 rounded-xl border border-line bg-sunk px-4 py-3 text-[13px]">
+            <p><b>Flytte denne e-posten ut av sakene?</b> Saken og svarforslaget fjernes, og ingenting sendes. E-posten blir liggende i Innboks under «Sortert bort», og du kan gjøre den om til sak igjen senere.</p>
+            <div className="flex flex-wrap gap-2">
+              <button className="btn btn-primary" disabled={movingOut} onClick={async () => { setMovingOut(true); const ok = await actions.notACase(c.id); setMovingOut(false); if (ok) onClose(); }}>{movingOut ? 'Flytter …' : 'Ja, ikke en sak'}</button>
+              <button className="btn btn-ghost" disabled={movingOut} onClick={() => setConfirmNotCase(false)}>Avbryt</button>
+            </div>
+          </div>
+        )}
 
         {c.flagged && (
           <div className="flex flex-wrap items-center gap-3 rounded-xl border border-bad/40 bg-bad-soft px-4 py-3">

@@ -716,6 +716,23 @@ export function createMail(d: MailDeps) {
       return c.json({ ok: true });
     });
 
+    // «Ikke en sak»: saken og lagret e-postinnhold fjernes, e-posten blir liggende som «Sortert bort» i Innboks.
+    // Bare for saker der ingenting er sendt til kunden; ellers brukes «Avsluttet» så historikken beholdes.
+    app.post('/api/cases/:id/not-a-case', async (c) => {
+      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan flytte saker.');
+      const kase = await caseOf(c.req.param('id'));
+      if (!kase) return h.err(c, 404, 'Fant ikke saken.');
+      const sent = (await db.query(`SELECT 1 FROM mail_messages WHERE case_id = $1 AND direction = 'outbound' UNION ALL SELECT 1 FROM drafts WHERE case_id = $1 AND state IN ('sending','sent')`, [kase.id])).rows.length;
+      if (sent) return h.err(c, 409, 'Det er allerede sendt svar til kunden i denne saken. Sett saken til «Avsluttet» i stedet, så historikken beholdes.');
+      const reason = `Flyttet bort av ${tenant.owner.firstName}`;
+      await db.query(`UPDATE triage_log SET decision = 'ignored', reason = $2, case_id = NULL WHERE tenant_id = $3 AND case_id = $1`, [kase.id, reason, tenantId]);
+      await db.query(`UPDATE activities SET text = 'Hendelse knyttet til en e-post som ble flyttet ut av sakene.' WHERE case_id = $1`, [kase.id]);
+      await db.query('DELETE FROM cases WHERE id = $1', [kase.id]);
+      await activity('owner', `${tenant.owner.firstName} flyttet en e-post ut av sakene (ikke en sak).`, null);
+      await h.audit(user(c), 'case.not_a_case', kase.number);
+      return c.json({ ok: true });
+    });
+
     app.get('/api/cases/:id/export', async (c) => {
       const kase = await caseOf(c.req.param('id'));
       if (!kase) return h.err(c, 404, 'Fant ikke saken.');
