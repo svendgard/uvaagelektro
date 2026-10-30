@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import type { Activity, ActivityActor, AgentId, AgentStatus, AuditAction, AuditEntry, Case, CaseStatus, ChatMessage, Draft, DraftKind, EmailMessage, Priority, UserRole } from '../domain/types';
+import type { InboxItem, Activity, ActivityActor, AgentId, AgentStatus, AuditAction, AuditEntry, Case, CaseStatus, ChatMessage, Draft, DraftKind, EmailMessage, Priority, UserRole } from '../domain/types';
 import { createJobActions } from './jobs';
 import { uvaagElektro, type TenantConfig } from '../config/tenant';
 import * as demoData from '../data/demoState';
@@ -23,6 +23,8 @@ export interface AppState {
   activities: Activity[];
   audit: AuditEntry[];
   ignored: { message: EmailMessage; reason: string }[];
+  /** All innkommende e-post (produksjon). I demo bygges listen fra meldingene. */
+  inbox: InboxItem[];
   busy: Partial<Record<AgentId, Busy>>;
   completed: Record<AgentId, number>;
   sending: Record<string, boolean>;
@@ -44,7 +46,7 @@ export interface MailStatus {
 }
 
 function initial(role: UserRole = 'owner'): AppState {
-  const base = { busy: {}, sending: {}, toasts: [], role, mail: null, loaded: DEMO };
+  const base = { busy: {}, sending: {}, toasts: [], role, mail: null, loaded: DEMO, inbox: [] as InboxItem[] };
   if (DEMO) return { ...demoData.buildDemoState(), ...base, completed: { intake: 6, quote: 4, followup: 3, coordinator: 9, control: 5 } };
   return {
     ...base, cases: [], messages: [], drafts: [], activities: [], audit: [], ignored: [], techChat: {},
@@ -398,7 +400,7 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
     if (DEMO) return;
     try {
       const [s, mail] = await Promise.all([api<any>('/api/state'), api<MailStatus>('/api/mail/status')]);
-      update((st) => ({ ...st, cases: s.cases, messages: s.messages, drafts: s.drafts, activities: [...s.activities].reverse(), ignored: s.ignored, mail, loaded: true }));
+      update((st) => ({ ...st, cases: s.cases, messages: s.messages, drafts: s.drafts, activities: [...s.activities].reverse(), ignored: s.ignored, inbox: s.inbox ?? [], mail, loaded: true }));
     } catch { update((st) => ({ ...st, loaded: true })); }
   }, [update]);
 
@@ -473,6 +475,14 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
       update((s) => ({ ...s, cases: s.cases.filter((x) => x.id !== caseId) }));
       void call(`/api/cases/${caseId}`, undefined, `Kundedata for ${c.number} er slettet.`, 'DELETE');
     },
+    makeCase: async (graphId: string): Promise<string | null> => {
+      try {
+        const r = await api<{ caseId: string }>(`/api/inbox/${encodeURIComponent(graphId)}/case`, { body: {} });
+        toast('Saken er opprettet. AIOliver lager et svarforslag.', 'success');
+        await refresh();
+        return r.caseId;
+      } catch (e) { toast(e instanceof Error ? e.message : 'Kunne ikke opprette saken.', 'danger'); return null; }
+    },
     // E-posttilkobling
     connectMail: async () => {
       try { const r = await api<{ url: string }>('/api/mail/connect', { body: {} }); window.location.assign(r.url); }
@@ -526,6 +536,7 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
     state, tenant, agents,
     actions: {
       ...jobs, approveAndSend, approveDraft, saveApproved, sendApproved, translateDraft, rejectDraft, regenerate, requestDraft, sendManual, moveCase, setPriority, markRead, resolveFlag, simulateInbound, simulateCustomerReply, exportCase, deleteCaseData, setRole, failNextSend, reset, toast,
+      makeCase: async (_graphId: string): Promise<string | null> => { toast('Ikke tilgjengelig i demo.', 'neutral'); return null; },
       connectMail: async () => {}, disconnectMail: async () => true, setSending: async (_: boolean) => true, syncNow: async () => true, refresh,
       ...remoteActions,
     },

@@ -85,12 +85,12 @@ async function callTool<T>(cfg: AiConfig, model: string, system: string, user: s
 const str = (v: unknown, max = 500) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 const strArr = (v: unknown, max = 10) => (Array.isArray(v) ? v.map((x) => str(x, 200)).filter(Boolean).slice(0, max) : []);
 
-export async function triage(cfg: AiConfig, t: TenantConfig, m: InMail): Promise<TriageOut & { engine: 'ai' | 'regler' }> {
+export async function triage(cfg: AiConfig, t: TenantConfig, m: InMail, opts: { force?: boolean } = {}): Promise<TriageOut & { engine: 'ai' | 'regler' }> {
   const text = `${m.subject}\n${m.body}`;
   // Åpenbare automatiske avsendere sorteres bort uten å sende innholdet til AI.
   const auto = /(^|[._-])(no-?reply|noreply|donotreply|mailer-daemon|postmaster|nyhetsbrev|newsletter|notifications?)([._-]|@)/i.test(m.fromEmail)
     || t.mail.ignoreRules.some((r) => (r.fromContains && m.fromEmail.includes(r.fromContains)) || (r.subjectContains && m.subject.includes(r.subjectContains)));
-  if (auto) return { ...ruleTriage(t, m), is_customer_inquiry: false, reason: 'Automatisk avsender eller nyhetsbrev', engine: 'regler' };
+  if (auto && !opts.force) return { ...ruleTriage(t, m), is_customer_inquiry: false, reason: 'Automatisk avsender eller nyhetsbrev', engine: 'regler' };
   if (!cfg.apiKey) return { ...ruleTriage(t, m), engine: 'regler' };
 
   const tool = {

@@ -39,7 +39,8 @@ const fakeFetch: typeof fetch = async (input: any, init: any = {}) => {
     return json({ access_token: 'AT-' + Math.random(), refresh_token: 'RT-secret', expires_in: 3600, id_token: idToken() });
   }
   if (url.endsWith('/me?$select=id,mail,userPrincipalName,displayName')) return json({ id: 'user-1', mail: meMail, userPrincipalName: meMail });
-  if (url.includes('/mailFolders/inbox/messages')) return json({ value: inbox.filter((m) => m.receivedDateTime >= decodeURIComponent(url).match(/ge (\S+)&/)![1]) });
+  if (url.includes('/me/messages?$filter')) return json({ value: inbox.filter((m) => m.receivedDateTime >= decodeURIComponent(url).match(/ge (\S+)&/)![1]).map((m) => ({ parentFolderId: 'inbox-id', ...m })) });
+  const wk = url.match(/\/me\/mailFolders\/(\w+)\?\$select=id$/); if (wk) return json({ id: `${wk[1]}-id` });
   if (url.includes('/mailFolders/sentitems/messages')) return json({ value: sent.filter((m) => m.receivedDateTime >= decodeURIComponent(url).match(/ge (\S+)&/)![1]) });
   if (url.endsWith('/$value')) return new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]), { status: 200, headers: { 'content-type': 'image/jpeg' } });
   if (url.includes('/attachments')) return json({ value: [{ id: 'a1', name: 'sikringsskap.jpg', size: 204800, contentType: 'image/jpeg', isInline: false }] });
@@ -47,6 +48,7 @@ const fakeFetch: typeof fetch = async (input: any, init: any = {}) => {
   if (/\/messages\/[^/]+\/send$/.test(url)) return sendFails ? json({ error: { message: 'Mailbox busy' } }, 400) : new Response(null, { status: 202 });
   if (url.endsWith('/me/sendMail')) return new Response(null, { status: 202 });
   if (method === 'PATCH' && /\/me\/messages\/[^/]+$/.test(url)) return json({ id: 'patched' });
+  const one = url.match(/\/me\/messages\/([^/?]+)\?\$select=/); if (one) { const f = inbox.find((m) => m.id === decodeURIComponent(one[1])); return f ? json(f) : json({ error: { message: 'Not found' } }, 404); }
   if (url.includes('api.anthropic.com')) {
     const b = JSON.parse(init.body);
     const user: string = b.messages[0].content;
@@ -140,7 +142,7 @@ const cases = (await pg.query<any>('SELECT * FROM cases')).rows;
 assert.equal(cases.length, 1, 'én sak');
 assert.equal(cases[0].number, `UE-2026-0001`);
 assert.equal(cases[0].status, 'awaiting_approval');
-const tl = (await pg.query<any>('SELECT * FROM triage_log ORDER BY graph_id')).rows;
+const tl = (await pg.query<any>(`SELECT * FROM triage_log WHERE decision = 'ignored' ORDER BY graph_id`)).rows;
 assert.deepEqual(tl.map((x) => x.graph_id), ['m2', 'm3']);
 assert.ok(!JSON.stringify(tl).includes('Kampanje denne uken'));
 const aiCalls = calls.filter((c) => c.url.includes('anthropic'));
@@ -290,6 +292,41 @@ const aiTriage = calls.filter((c) => c.url.includes('anthropic') && c.body!.incl
 assert.ok(!aiTriage.body!.includes('IMG_6698'), 'AI får ren tekst uten plassholdere');
 ok('Innlimte bilder hentes, vedlegg åpnes bare innlogget og trygt, AI får ren tekst');
 
+// 10d. All e-post synlig: interne, egne, e-post i egne mapper. Søppelpost hoppes over. Eieren kan gjøre e-post om til sak.
+const aiBefore = calls.filter((c) => c.url.includes('anthropic')).length;
+inbox.push(
+  msg('i1', 'conv-i1', 'kollega@uvaagelektro.no', 'Kollega', 'Bestilling kabel', 'Kan du bestille 100 m kabel?', '2026-10-23T11:00:00Z'),
+  { ...msg('s9', 'conv-s9', 'espen@uvaagelektro.no', 'Espen', 'Test', 'Test til meg selv', '2026-10-23T11:01:00Z') },
+  { ...msg('f1', 'conv-f1', 'ny2@test.no', 'Mappe Kunde', 'Lys i garasjen', 'Hei, trenger lys i garasjen.', '2026-10-23T11:02:00Z'), parentFolderId: 'regel-mappe' },
+  { ...msg('j1', 'conv-j1', 'spam@spam.no', 'Spam', 'Vinn', 'Spam', '2026-10-23T11:03:00Z'), parentFolderId: 'junkemail-id' },
+);
+clock = Date.parse('2026-10-23T11:05:00Z');
+await mail.syncOnce();
+const st7 = (await espen.req('GET', '/api/state')).json;
+const item = (id: string) => st7.inbox.find((x: any) => x.id === id);
+assert.equal(item('i1').decision, 'internal'); assert.equal(item('i1').subject, 'Bestilling kabel');
+assert.equal(item('s9').decision, 'self');
+assert.equal(item('f1').decision, 'case', 'e-post i egen mappe blir behandlet'); assert.ok(item('f1').caseNumber);
+assert.equal(item('j1'), undefined, 'søppelpost hoppes over');
+assert.equal(item('m1').decision, 'case'); assert.equal(item('m2').decision, 'ignored');
+const aiNew = calls.filter((c) => c.url.includes('anthropic')).slice(aiBefore).map((c) => c.body!).join('\n');
+assert.ok(!aiNew.includes('100 m kabel') && !aiNew.includes('Test til meg selv'), 'interne og egne e-poster sendes ikke til AI');
+assert.ok(!(await pg.query(`SELECT 1 FROM mail_messages WHERE graph_id IN ('i1','s9')`)).rows.length, 'innhold lagres ikke for e-post som ikke er sak');
+ok('All e-post vises: interne, egne og e-post i egne mapper. Søppelpost hoppes over. Innhold lagres bare for saker.');
+
+const view = await espen.req('GET', '/api/inbox/i1');
+assert.equal(view.status, 200); assert.equal(view.json.body, 'Kan du bestille 100 m kabel?'); assert.equal(view.json.decision, 'internal');
+assert.equal((await new Client().req('GET', '/api/inbox/i1')).status, 401);
+assert.equal((await sa.req('POST', '/api/inbox/i1/case')).status, 403);
+const mk = await espen.req('POST', '/api/inbox/i1/case');
+assert.equal(mk.status, 200); assert.ok(mk.json.caseId);
+assert.equal((await espen.req('POST', '/api/inbox/i1/case')).json.caseId, mk.json.caseId, 'ingen dobbel sak');
+const st8 = (await espen.req('GET', '/api/state')).json;
+assert.equal(st8.inbox.find((x: any) => x.id === 'i1').decision, 'case');
+assert.ok(st8.drafts.some((d: any) => d.caseId === mk.json.caseId && d.state === 'pending'), 'utkast laget');
+assert.ok(st8.activities.some((a: any) => a.text.includes('gjorde e-posten fra')));
+ok('E-post åpnes direkte fra Microsoft. Eieren kan gjøre den om til sak med utkast, én gang.');
+
 // 11. Synkroniseringsrunder registreres for helserapportering
 const lastRun = await mail.latestDeliveredRun();
 assert.ok(lastRun && lastRun.scan_run_id.startsWith('mail-sync-') && lastRun.persisted_at);
@@ -303,5 +340,5 @@ assert.equal(st.status, 'reconnect_required'); assert.equal(st.connected, false)
 assert.equal(await mail.syncOnce(), null);
 ok('Utløpt Microsoft-tilkobling oppdages og vises. Synk stopper uten å krasje.');
 
-console.log(`\n${pass} av 17 tester bestått`);
+console.log(`\n${pass} av 19 tester bestått`);
 process.exit(0);
