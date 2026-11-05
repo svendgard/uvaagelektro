@@ -48,7 +48,7 @@ export function createMail(d: MailDeps) {
   const f = d.fetch ?? fetch;
   let syncing = false;
   let backfilled = false;
-  let signatureTried = false;
+  let signatureTried = 0;
   let styleCheckedAt = 0;
   let excludeFolders: string[] | undefined;
 
@@ -289,12 +289,13 @@ export function createMail(d: MailDeps) {
         }
         if (old.length) log('info', 'Hentet innlimte bilder for eldre e-poster', { messages: old.length });
       }
-      // Engangs: hent signaturen fra Outlook hvis den ikke er hentet før.
-      if (!signatureTried) {
-        signatureTried = true;
+      // Hent signaturen fra Outlook ved oppstart hvis den ikke er hentet, og prøv igjen daglig hvis den ikke ble funnet.
+      if (!signatureTried || now() - signatureTried > 864e5) {
+        signatureTried = now();
         const cur = await getSetting<SigSetting>('signature');
         // Ikke hentet, eller ikke funnet for mer enn et døgn siden: prøv igjen (f.eks. etter at eieren har sendt fra PC).
-        if (!cur || (!('html' in cur) && now() - Date.parse(cur.fetchedAt) > 864e5)) await fetchSignature().catch((e) => log('warn', 'Kunne ikke hente signatur', { error: String(e) }));
+        // Ved oppstart prøves det alltid på nytt når den ikke er funnet (nye versjoner kan finne mer).
+        if (!cur || !('html' in cur)) await fetchSignature().catch((e) => log('warn', 'Kunne ikke hente signatur', { error: String(e) }));
       }
       // Skrivestil: hentes første gang og deretter ukentlig (sjekkes maks én gang i timen).
       if (now() - styleCheckedAt > 3600e3) {
