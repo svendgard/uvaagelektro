@@ -79,8 +79,8 @@ export function ControlQueue({ openCase, compact }: { openCase: (id: string) => 
             const issues = (j.checks ?? []).filter((x) => x.status !== 'ok' && x.id !== 'basis').slice(0, 2);
             const total = j.invoice ? invoiceTotal(j.invoice.lines) : 0;
             return (
-              <li key={c.id} className="flex flex-col gap-2 rounded-xl border border-line p-3">
-                <button onClick={() => openCase(c.id)} className="flex items-start gap-3 text-left">
+              <li key={c.id} className="flex min-w-0 flex-col gap-2 rounded-xl border border-line p-3">
+                <button onClick={() => openCase(c.id)} className="flex w-full min-w-0 items-start gap-3 text-left">
                   <TechAvatar t={t} size={32} />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">

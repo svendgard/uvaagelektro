@@ -293,6 +293,7 @@ export const STATUS_ORDER: CaseStatus[] = [
   'ready_for_quote',
   'quote_sent',
   'follow_up',
+  'in_progress',
   'won',
   'lost',
 ];
@@ -305,6 +306,7 @@ export const STATUS_META: Record<CaseStatus, { label: string; short: string; ton
   ready_for_quote: { label: 'Klar for tilbud', short: 'Klar for tilbud', tone: 'bg-brand-soft text-brand', dot: 'bg-brand' },
   quote_sent: { label: 'Tilbud sendt', short: 'Tilbud sendt', tone: 'bg-info-soft text-info', dot: 'bg-info' },
   follow_up: { label: 'Oppfølging', short: 'Oppfølging', tone: 'bg-warn-soft text-warn', dot: 'bg-warn' },
+  in_progress: { label: 'Under arbeid', short: 'Under arbeid', tone: 'bg-violet-soft text-violet', dot: 'bg-violet' },
   won: { label: 'Akseptert / vunnet', short: 'Vunnet', tone: 'bg-ok-soft text-ok', dot: 'bg-ok' },
   lost: { label: 'Avsluttet / tapt', short: 'Tapt', tone: 'bg-sunk text-faint', dot: 'bg-faint' },
 };

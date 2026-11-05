@@ -343,6 +343,25 @@ const again = await espen.req('POST', '/api/inbox/i1/case');
 assert.equal(again.status, 200); assert.notEqual(again.json.caseId, madeId);
 ok('«Ikke en sak»: bare eieren, ikke når svar er sendt, saken fjernes og e-posten kan gjøres om til sak igjen');
 
+// 10f. «Under arbeid»: bare eieren setter den. Sending og nye forslag flytter ikke saken; nytt svar fra kunden gjør.
+const fState = (await espen.req('GET', '/api/state')).json;
+const fCase = fState.cases.find((c: any) => c.id === fState.inbox.find((x: any) => x.id === 'f1').caseId);
+assert.equal((await espen.req('POST', `/api/cases/${fCase.id}`, { status: 'in_progress' })).status, 200);
+assert.equal((await espen.req('POST', `/api/cases/${fCase.id}/draft`, {})).status, 200);
+let fNow = (await espen.req('GET', '/api/state')).json;
+assert.equal(fNow.cases.find((c: any) => c.id === fCase.id).status, 'in_progress', 'nytt forslag på eierens initiativ flytter ikke saken');
+const fDraft = fNow.drafts.find((d: any) => d.caseId === fCase.id && d.state === 'pending');
+assert.equal((await espen.req('POST', `/api/drafts/${fDraft.id}/approve`, {})).status, 200);
+assert.equal((await espen.req('POST', `/api/drafts/${fDraft.id}/send`)).status, 200);
+fNow = (await espen.req('GET', '/api/state')).json;
+assert.equal(fNow.cases.find((c: any) => c.id === fCase.id).status, 'in_progress', 'sending flytter ikke saken ut av Under arbeid');
+inbox.push(msg('f2', 'conv-f1', 'ny2@test.no', 'Mappe Kunde', 'SV: Lys i garasjen', 'Passer det fredag?', '2026-10-23T11:20:00Z'));
+clock = Date.parse('2026-10-23T11:21:00Z');
+await mail.syncOnce();
+fNow = (await espen.req('GET', '/api/state')).json;
+assert.equal(fNow.cases.find((c: any) => c.id === fCase.id).status, 'awaiting_approval', 'nytt svar fra kunden: Venter på eieren');
+ok('«Under arbeid»: settes av eieren, blir stående ved sending og nye forslag, flyttes når kunden svarer');
+
 // 11. Synkroniseringsrunder registreres for helserapportering
 const lastRun = await mail.latestDeliveredRun();
 assert.ok(lastRun && lastRun.scan_run_id.startsWith('mail-sync-') && lastRun.persisted_at);
@@ -356,5 +375,5 @@ assert.equal(st.status, 'reconnect_required'); assert.equal(st.connected, false)
 assert.equal(await mail.syncOnce(), null);
 ok('Utløpt Microsoft-tilkobling oppdages og vises. Synk stopper uten å krasje.');
 
-console.log(`\n${pass} av 20 tester bestått`);
+console.log(`\n${pass} av 21 tester bestått`);
 process.exit(0);
