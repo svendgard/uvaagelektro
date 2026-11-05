@@ -201,8 +201,8 @@ export function Dashboard({ nav, onFilter }: { nav: Nav; onFilter: (f: string) =
 
       <div className="grid grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="flex min-w-0 flex-col gap-5">
-          <ToYou nav={nav} onFilter={onFilter} />
           <KpiRow onPick={onFilter} />
+          <ToYou nav={nav} onFilter={onFilter} />
           {tenant.features.projects && <ControlQueue openCase={nav.openCase} />}
         </div>
         <aside className="card flex max-h-[44rem] min-w-0 flex-col p-4 lg:sticky lg:top-20">
