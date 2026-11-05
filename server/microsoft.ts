@@ -208,6 +208,13 @@ export class Graph {
     }
   }
 
+  /** Siste sendte e-poster som tekst, med mottakere (for å lære eierens skrivestil). */
+  async recentSentText(n = 50): Promise<GraphMessage[]> {
+    const r = await this.call<{ value: GraphMessage[] }>('GET',
+      `/me/mailFolders/sentitems/messages?$top=${n}&$orderby=sentDateTime desc&$select=id,subject,toRecipients,ccRecipients,body`, undefined, { Prefer: 'outlook.body-content-type="text"' });
+    return r.value;
+  }
+
   /** Siste sendte e-poster som HTML (for å finne signaturen). */
   async recentSentHtml(n = 25): Promise<{ id: string; body?: { contentType: string; content: string } }[]> {
     const r = await this.call<{ value: { id: string; body?: { contentType: string; content: string } }[] }>('GET',

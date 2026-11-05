@@ -88,3 +88,41 @@ export function stripClosing(text: string, knownLines: string[] = []): string {
   }
   return t;
 }
+
+/**
+ * Reserve når signaturen ikke er merket: finner den avslutningen som går igjen i flere sendte e-poster
+ * (samme linjer på slutten av egen tekst) og som inneholder eierens navn eller firma.
+ */
+export function findRepeatedSignature(htmls: string[], hints: string[]): string | null {
+  const norm = (t: string) => t.replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim().toLowerCase();
+  type Chunk = { start: number; text: string };
+  const parse = (html: string) => {
+    const own = ownPart(html);
+    const chunks: Chunk[] = [];
+    const re = /<(p|div|tr|table|h\d)\b[^>]*>|<br\s*\/?>/gi;
+    let last = 0; let m: RegExpExecArray | null;
+    const push = (from: number, to: number) => { const text = norm(own.slice(from, to).replace(/<[^>]+>/g, ' ')); if (text) chunks.push({ start: from, text }); };
+    while ((m = re.exec(own))) { push(last, m.index); last = m.index; }
+    push(last, own.length);
+    return { own, chunks };
+  };
+  const docs = htmls.map(parse).filter((d) => d.chunks.length >= 2);
+  const hintsN = hints.map(norm).filter((h) => h.length >= 3);
+  let best: { html: string; lines: number } | null = null;
+  for (let a = 0; a < docs.length; a++) {
+    for (let b = a + 1; b < docs.length; b++) {
+      const A = docs[a].chunks, B = docs[b].chunks;
+      let k = 0;
+      while (k < A.length && k < B.length && A[A.length - 1 - k].text === B[B.length - 1 - k].text) k++;
+      if (k < 2 || k >= A.length) continue; // minst to like linjer, og noe egen tekst foran
+      const common = A.slice(A.length - k);
+      if (!common.some((c) => hintsN.some((h) => c.text.includes(h)))) continue;
+      // Start på hilsenen hvis den er med, ellers på første felles linje.
+      const greet = common.findIndex((c) => /^(med vennlig hilsen|vennlig hilsen|med hilsen|mvh|hilsen|best regards|kind regards|regards)\b/.test(c.text));
+      const from = common[greet >= 0 ? greet : 0].start;
+      const html = sanitizeHtml(docs[a].own.slice(from)).trim();
+      if (!best || k > best.lines) best = { html, lines: k };
+    }
+  }
+  return best?.html ?? null;
+}

@@ -1,6 +1,6 @@
 // Tester uthenting av signatur fra Outlook-e-post og fjerning av dobbel hilsen.
 import assert from 'node:assert/strict';
-import { extractSignature, cidsIn, ownPart, previewHtml, sanitizeHtml, stripClosing } from '../server/signature.ts';
+import { extractSignature, cidsIn, findRepeatedSignature, ownPart, previewHtml, sanitizeHtml, stripClosing } from '../server/signature.ts';
 
 let pass = 0;
 const ok = (n: string) => { pass++; console.log(`  ✓ ${n}`); };
@@ -48,4 +48,13 @@ assert.equal(stripClosing(ps, known), ps, 'PS beholdes');
 assert.equal(stripClosing('Hei,\n\nVi kommer tirsdag.', known), 'Hei,\n\nVi kommer tirsdag.');
 ok('Hilsen og tekstsignatur fjernes, men aldri et PS eller vanlig tekst');
 
-console.log(`\n${pass} av 5 tester bestått`);
+// 6. Reserve: umerket signatur som går igjen i flere e-poster
+const mk = (txt: string) => `<html><body><div><p>${txt}</p><p>&nbsp;</p><p>Med vennlig hilsen</p><p><b>Espen Uvaag Halvorsen</b></p><table><tr><td><img src="cid:logo9"></td><td>Uvaag Elektro AS<br>M: +47 458 70 500</td></tr></table></div><div id="divRplyFwdMsg">Fra: kunde ${txt}</div></body></html>`;
+const rep = findRepeatedSignature([mk('Hei Per, kommer tirsdag.'), mk('Hei Kari, sender pris i morgen.'), '<html><body><p>Ok</p></body></html>'], ['Espen Uvaag', 'Uvaag Elektro AS'])!;
+assert.ok(rep.startsWith('<p>Med vennlig hilsen</p>'), rep.slice(0, 40));
+assert.ok(rep.includes('cid:logo9') && rep.includes('458 70 500') && !rep.includes('kommer tirsdag') && !rep.includes('Fra: kunde'));
+assert.equal(findRepeatedSignature([mk('A'), '<html><body><p>B</p><p>Mvh</p><p>Ola</p></body></html>'], ['Espen Uvaag']), null, 'ingen felles avslutning');
+assert.equal(findRepeatedSignature(['<p>Hei</p><p>Mvh</p><p>Hans</p>', '<p>Hallo</p><p>Mvh</p><p>Hans</p>'], ['Espen Uvaag']), null, 'må inneholde eierens navn eller firma');
+ok('Reserve: umerket signatur som går igjen i flere e-poster finnes, med logo');
+
+console.log(`\n${pass} av 6 tester bestått`);

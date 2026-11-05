@@ -7,8 +7,8 @@ import { decryptSecret, encryptSecret } from './auth/totp';
 import { newToken, sha256 } from './auth/crypto';
 import { Graph, GraphError, MsAuthError, addr, authorizeUrl, exchangeCode, idTokenClaims, pkce, refreshTokens, type Fetch, type GraphMessage, type MsConfig } from './microsoft';
 import { cleanMail } from '../src/lib/cleanMail';
-import { cidsIn, extractSignature, previewHtml, stripClosing, type StoredSignature } from './signature';
-import { draftReply, translate, triage, LANGS, type AiConfig, type InMail, type Lang } from './ai';
+import { cidsIn, extractSignature, findRepeatedSignature, previewHtml, stripClosing, type StoredSignature } from './signature';
+import { describeStyle, draftReply, translate, triage, LANGS, type AiConfig, type InMail, type Lang } from './ai';
 
 /**
  * E-post for Agentkontoret: tilkobling til Microsoft 365, synkronisering, saker, utkast og sending.
@@ -49,6 +49,7 @@ export function createMail(d: MailDeps) {
   let syncing = false;
   let backfilled = false;
   let signatureTried = false;
+  let styleCheckedAt = 0;
   let excludeFolders: string[] | undefined;
 
   const activity = (actor: string, text: string, caseId?: string | null, tone?: string) =>
@@ -94,20 +95,58 @@ export function createMail(d: MailDeps) {
   /** Henter signaturen (med logo) fra eierens siste sendte e-poster i Outlook. */
   async function fetchSignature(): Promise<SigSetting> {
     const g = graph();
-    for (const m of await g.recentSentHtml(25)) {
-      const html = m.body?.content ?? '';
-      const sig = extractSignature(html);
-      if (!sig) continue;
+    const sent = await g.recentSentHtml(25);
+    const save = async (sig: string, messageId: string, how: string): Promise<SigSetting> => {
       const cids = cidsIn(sig);
-      const images = cids.length ? (await g.inlineImages(m.id)).filter((i) => cids.includes(i.contentId) && i.size <= 400_000) : [];
-      const value: SigSetting = { html: sig, images: images.map(({ size: _s, ...i }) => i), fetchedAt: new Date(now()).toISOString(), sourceMessageId: m.id, active: true };
+      const images = cids.length ? (await g.inlineImages(messageId)).filter((i) => cids.includes(i.contentId) && i.size <= 400_000) : [];
+      const value: SigSetting = { html: sig, images: images.map(({ size: _s, ...i }) => i), fetchedAt: new Date(now()).toISOString(), sourceMessageId: messageId, active: true };
       await setSetting('signature', value);
-      log('info', 'Signatur hentet fra Outlook', { images: images.length });
+      log('info', 'Signatur hentet fra Outlook', { how, images: images.length, sent: sent.length });
       return value;
+    };
+    // 1) Signatur merket av Outlook.
+    for (const m of sent) {
+      const sig = extractSignature(m.body?.content ?? '');
+      if (sig) return save(sig, m.id, 'merket');
+    }
+    // 2) Reserve: samme avslutning i flere e-poster, med eierens navn eller firma.
+    const withHtml = sent.filter((m) => m.body?.content);
+    const rep = findRepeatedSignature(withHtml.map((m) => m.body!.content), [tenant.owner.name, tenant.owner.firstName, tenant.company.name, tenant.company.shortName]);
+    if (rep) {
+      const src = withHtml.find((m) => m.body!.content.includes(rep.slice(0, 60))) ?? withHtml[0];
+      return save(rep, src.id, 'gjentatt');
     }
     const none: SigSetting = { notFound: true, fetchedAt: new Date(now()).toISOString(), active: false };
     await setSetting('signature', none);
+    log('warn', 'Fant ingen signatur i sendte e-poster', { sent: sent.length });
     return none;
+  }
+
+  /**
+   * Eierens skrivestil: ekte eksempler fra e-poster han har sendt til folk utenfor firmaet (bare hans egen tekst,
+   * uten sitert tråd og signatur), og en kort beskrivelse. Hentes på nytt hver uke.
+   */
+  type StyleSetting = { summary: string; examples: string[]; fetchedAt: string };
+  async function fetchStyle(): Promise<StyleSetting> {
+    const own = tenant.mail.mailbox.toLowerCase();
+    const ownDomain = own.split('@')[1] ?? '';
+    const examples: string[] = [];
+    for (const m of await graph().recentSentText(50)) {
+      const rcpts = [...(m.toRecipients ?? []), ...(m.ccRecipients ?? [])].map((r) => addr(r).email);
+      if (!rcpts.some((e) => e && !e.endsWith(`@${ownDomain}`))) continue; // bare e-post til kunder/eksterne
+      const lines = cleanMail(m.body?.content ?? '').text.split('\n');
+      const close = lines.findIndex((l, i) => i > 0 && /^\s*(med vennlig hilsen|vennlig hilsen|med hilsen|mvh|hilsen|best regards|kind regards|regards)\b/i.test(l));
+      const text = (close > 0 ? lines.slice(0, close + 1) : lines).join('\n').trim();
+      if (text.length < 20 || text.length > 1500) continue;
+      examples.push(text);
+      if (examples.length >= 15) break;
+    }
+    let summary = '';
+    try { summary = await describeStyle(d.ai, tenant, examples); } catch (e) { log('warn', 'Kunne ikke beskrive skrivestil', { error: String(e) }); }
+    const value = { summary, examples, fetchedAt: new Date(now()).toISOString() };
+    await setSetting('style', value);
+    log('info', 'Skrivestil hentet fra sendte e-poster', { examples: examples.length });
+    return value;
   }
 
   async function nextNumber(): Promise<string> {
@@ -141,7 +180,8 @@ export function createMail(d: MailDeps) {
     const missing: string[] = c.missing_info ?? [];
     const kind = opts.kind ?? (missing.length ? 'info_request' : 'reply');
     const autoSignature = !!(await activeSignature());
-    const out = await draftReply(d.ai, tenant, { kind, customerName: c.customer.name, summary: c.summary, missing, urgent: c.priority === 'urgent', thread: await threadFor(caseId), feedback: opts.feedback, previous: opts.previous, autoSignature });
+    const styleSet = await getSetting<StyleSetting>('style');
+    const out = await draftReply(d.ai, tenant, { kind, customerName: c.customer.name, summary: c.summary, missing, urgent: c.priority === 'urgent', thread: await threadFor(caseId), feedback: opts.feedback, previous: opts.previous, autoSignature, style: styleSet ? { summary: styleSet.summary, examples: styleSet.examples } : undefined });
     const prev = (await db.query<{ v: number }>('SELECT COALESCE(max(version),0)::int AS v FROM drafts WHERE case_id = $1', [caseId])).rows[0].v;
     await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND state IN ('pending','approved','send_failed')`, [caseId]);
     const lastIn = (await db.query<{ graph_id: string; from_addr: any; to_addrs: any[]; cc_addrs: any[] }>(`SELECT graph_id, from_addr, to_addrs, cc_addrs FROM mail_messages WHERE case_id = $1 AND direction = 'inbound' AND graph_id IS NOT NULL ORDER BY sent_at DESC LIMIT 1`, [caseId])).rows[0];
@@ -199,17 +239,22 @@ export function createMail(d: MailDeps) {
   }
 
   /** Oppretter sak fra en e-post: sak, melding, utkast og logg. */
-  async function caseFromMessage(m: GraphMessage, t: Awaited<ReturnType<typeof triage>>, atts: Awaited<ReturnType<typeof attachmentsFor>>, manualBy?: string) {
+  async function caseFromMessage(m: GraphMessage, t: Awaited<ReturnType<typeof triage>>, atts: Awaited<ReturnType<typeof attachmentsFor>>, manualBy?: string, o: { waiting?: boolean } = {}) {
     const id = randomUUID();
     const flagged = t.urgent.is_urgent ? { reason: t.urgent.reason || 'Mulig sikkerhetsrisiko. Ring kunden.' }
       : t.injection_suspected ? { reason: 'E-posten inneholder tekst som prøver å styre agentene. Behandlet som vanlig tekst.' } : null;
     await db.query(`INSERT INTO cases(id, tenant_id, number, conversation_id, title, status, priority, job_type, customer, description, summary, next_action, missing_info, flagged, assigned_agent, unread, created_at, updated_at)
-      VALUES ($1,$2,$3,$4,$5,'ai_processing',$6,$7,$8,$9,$10,$11,$12,$13,'intake',true,$14,$14)`,
-      [id, tenantId, await nextNumber(), m.conversationId, `${t.title} – ${t.customer.name}`.slice(0, 160), t.urgent.is_urgent ? 'urgent' : t.priority, t.job_type,
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'intake',true,$15,$15)`,
+      [id, tenantId, await nextNumber(), m.conversationId, `${t.title} – ${t.customer.name}`.slice(0, 160), o.waiting && !flagged ? 'awaiting_customer' : 'ai_processing',
+        t.urgent.is_urgent ? 'urgent' : t.priority, t.job_type,
         JSON.stringify({ name: t.customer.name, email: t.customer.email, phone: t.customer.phone, address: t.customer.address, company: t.customer.company, orgNr: t.customer.org_nr, type: t.customer.company ? 'naering' : 'privat' }),
-        (m.subject ?? '').slice(0, 300), t.summary, 'AIOliver lager svarutkast.', JSON.stringify(t.missing_info), flagged ? JSON.stringify(flagged) : null, new Date(now())]);
+        (m.subject ?? '').slice(0, 300), t.summary, o.waiting ? 'Du står på kopi. Venter på svar fra andre.' : 'AIOliver lager svarutkast.', JSON.stringify(t.missing_info), flagged ? JSON.stringify(flagged) : null, new Date(now())]);
     await insertMessage(id, m, 'inbound', atts);
-    await logItem(m, 'case', '', id);
+    await logItem(m, 'case', o.waiting ? 'Du står på kopi' : '', id);
+    if (o.waiting && !flagged) {
+      await activity('intake', `AIEmma registrerte en sak der du står på kopi (${t.customer.name}). Andre skal svare, så den ligger under «Venter på kunde».`, id);
+      return id;
+    }
     await activity(manualBy ? 'owner' : 'intake', manualBy
       ? `${tenant.owner.firstName} gjorde e-posten fra ${t.customer.name} om til en sak.`
       : `AIEmma registrerte ny henvendelse fra ${t.customer.name}${t.engine === 'regler' ? ' (enkle regler)' : ''}.`, id);
@@ -247,7 +292,15 @@ export function createMail(d: MailDeps) {
       // Engangs: hent signaturen fra Outlook hvis den ikke er hentet før.
       if (!signatureTried) {
         signatureTried = true;
-        if (!(await getSetting('signature'))) await fetchSignature().catch((e) => log('warn', 'Kunne ikke hente signatur', { error: String(e) }));
+        const cur = await getSetting<SigSetting>('signature');
+        // Ikke hentet, eller ikke funnet for mer enn et døgn siden: prøv igjen (f.eks. etter at eieren har sendt fra PC).
+        if (!cur || (!('html' in cur) && now() - Date.parse(cur.fetchedAt) > 864e5)) await fetchSignature().catch((e) => log('warn', 'Kunne ikke hente signatur', { error: String(e) }));
+      }
+      // Skrivestil: hentes første gang og deretter ukentlig (sjekkes maks én gang i timen).
+      if (now() - styleCheckedAt > 3600e3) {
+        styleCheckedAt = now();
+        const st = await getSetting<StyleSetting>('style');
+        if (!st || now() - Date.parse(st.fetchedAt) > 7 * 864e5) await fetchStyle().catch((e) => log('warn', 'Kunne ikke hente skrivestil', { error: String(e) }));
       }
       // ── Innboks ──
       const inboxSince = conn.inbox_watermark ? new Date(conn.inbox_watermark) : new Date(new Date(conn.connected_at).getTime() - (d.initialSyncDays ?? 3) * 864e5);
@@ -267,24 +320,34 @@ export function createMail(d: MailDeps) {
         if (from.email === mailbox && !recipients.includes(mailbox)) { bump(); continue; }
         processed++;
         const existing = (await db.query<{ id: string; status: string }>('SELECT id, status FROM cases WHERE tenant_id = $1 AND conversation_id = $2 ORDER BY created_at DESC LIMIT 1', [tenantId, m.conversationId])).rows[0];
+        const toList = (m.toRecipients ?? []).map((r) => addr(r).email);
+        const ccList = (m.ccRecipients ?? []).map((r) => addr(r).email);
+        const ownerOnCc = !toList.includes(mailbox) && ccList.includes(mailbox);
+        const asMail = async (atts: Awaited<ReturnType<typeof attachmentsFor>>): Promise<InMail> => ({
+          fromName: from.name, fromEmail: from.email, subject: m.subject ?? '', body: cleanMail(m.body?.content ?? '').text || (m.body?.content ?? ''),
+          receivedAt: m.receivedDateTime, attachments: atts.map((a) => a.filename), to: toList, cc: ccList, ownerOnCc,
+        });
         if (existing && from.email !== mailbox) {
-          await insertMessage(existing.id, m, 'inbound', await attachmentsFor(m));
+          const atts = await attachmentsFor(m);
+          await insertMessage(existing.id, m, 'inbound', atts);
           await logItem(m, 'case', '', existing.id);
           await db.query(`UPDATE cases SET unread = true, updated_at = $2 WHERE id = $1`, [existing.id, new Date(now())]);
-          await activity('customer', `${from.name || from.email} svarte i saken.`, existing.id);
-          if (!['won', 'lost'].includes(existing.status)) await createDraft(existing.id, { fromCustomer: true });
+          // Står eieren bare på kopi, vurderer AI om han må svare. Ellers legges e-posten bare til i saken.
+          const needsOwner = !ownerOnCc || (await triage(d.ai, tenant, await asMail(atts), { force: true })).owner_action === 'reply';
+          await activity('customer', `${from.name || from.email} skrev i saken${ownerOnCc ? ` (du står på kopi${needsOwner ? '' : ', ingen svar trengs fra deg'})` : ''}.`, existing.id);
+          if (needsOwner && !['won', 'lost'].includes(existing.status)) await createDraft(existing.id, { fromCustomer: true });
         } else if (from.email === mailbox) {
           await logItem(m, 'self', 'Sendt fra deg selv');
         } else if (ownDomain && from.email.endsWith(`@${ownDomain}`)) {
           await logItem(m, 'internal', 'Intern e-post'); // ikke sendt til AI
         } else {
           const atts = await attachmentsFor(m);
-          const mail: InMail = { fromName: from.name, fromEmail: from.email, subject: m.subject ?? '', body: cleanMail(m.body?.content ?? '').text || (m.body?.content ?? ''), receivedAt: m.receivedDateTime, attachments: atts.map((a) => a.filename) };
-          const t = await triage(d.ai, tenant, mail);
+          const t = await triage(d.ai, tenant, await asMail(atts));
           if (!t.is_customer_inquiry) {
-            await logItem(m, 'ignored', t.reason);
+            await logItem(m, 'ignored', ownerOnCc ? `Du står på kopi: ${t.reason}` : t.reason);
           } else {
-            await caseFromMessage(m, t, atts);
+            // På kopi i en kundesak der andre skal svare: sak under «Venter på kunde», uten svarforslag.
+            await caseFromMessage(m, t, atts, undefined, { waiting: ownerOnCc && t.owner_action !== 'reply' });
             newCases++;
           }
         }

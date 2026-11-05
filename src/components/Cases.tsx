@@ -35,7 +35,7 @@ export function CaseRow({ c, draft, onOpen }: { c: Case; draft?: Draft; onOpen: 
     : draft?.state === 'approved' || draft?.state === 'sending' ? 'Godkjent – klar til å sende'
     : draft?.state === 'pending' ? (draft.kind === 'quote' ? 'Tilbudsutkast klart' : 'Svarforslag klart')
     : c.status === 'ready_for_quote' ? 'Klar for tilbud – sett pris'
-    : cat === 'customer' ? 'Svar sendt'
+    : cat === 'customer' ? (c.nextAction?.startsWith('Du står på kopi') ? 'Du står på kopi – venter på andre' : 'Svar sendt')
     : cat === 'quote' ? 'Tilbud sendt'
     : cat === 'working' ? 'Under arbeid'
     : cat === 'closed' ? (c.status === 'won' ? 'Vunnet' : 'Avsluttet')
