@@ -22,6 +22,7 @@ export type CaseStatus =
   | 'ready_for_quote'
   | 'quote_sent'
   | 'follow_up'
+  | 'in_progress'
   | 'won'
   | 'lost';
 

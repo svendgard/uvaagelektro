@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../state/store';
 import type { Attachment, CaseStatus, Draft, EmailMessage, Priority } from '../domain/types';
-import { PRIORITY_META, STATUS_META, STATUS_ORDER } from '../config/tenant';
+import { PRIORITY_META } from '../config/tenant';
+import { CATEGORY_ORDER, categoryMeta, categoryOf, statusFor, type Category } from '../config/categories';
 import { Icon, Modal, Portrait } from './ui';
 import { ActorAvatar } from './Dashboard';
 import { DEMO } from '../demo';
@@ -320,8 +321,9 @@ export function CaseDetail({ caseId, onClose }: { caseId: string | null; onClose
       <div className="flex flex-col gap-4 p-4 sm:p-5">
         <div className="flex flex-wrap items-center gap-2">
           <label className="sr-only" htmlFor="cd-status">Status</label>
-          <select id="cd-status" value={c.status} onChange={(e) => actions.moveCase(c.id, e.target.value as CaseStatus)} className={cx('rounded-full border-0 px-3 py-1 text-xs font-bold', STATUS_META[c.status].tone)}>
-            {STATUS_ORDER.map((s) => <option key={s} value={s}>{STATUS_META[s].label}</option>)}
+          <select id="cd-status" value={categoryOf(c.status)} onChange={(e) => actions.moveCase(c.id, statusFor(e.target.value as Category, c.status))}
+            className={cx('rounded-full border-0 px-3 py-1 text-xs font-bold', categoryMeta(categoryOf(c.status), tenant.owner.firstName).tone)}>
+            {CATEGORY_ORDER.map((k) => <option key={k} value={k}>{categoryMeta(k, tenant.owner.firstName).label}</option>)}
           </select>
           <label className="sr-only" htmlFor="cd-prio">Prioritet</label>
           <select id="cd-prio" value={c.priority} onChange={(e) => actions.setPriority(c.id, e.target.value as Priority)} className="rounded-full border border-line bg-surface px-3 py-1 text-xs font-semibold">

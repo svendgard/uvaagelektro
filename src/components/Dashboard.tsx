@@ -4,6 +4,8 @@ import type { Activity, ActivityActor, AgentId } from '../domain/types';
 import { AgentStatusPill, CaseStatusBadge, Empty, Icon, Modal, Portrait, PriorityMark } from './ui';
 import { cx, fmtDateTime, fmtRelative, fmtTime } from '../lib/util';
 import { ControlQueue } from './Projects';
+import { CaseRow, useCasesIn } from './Cases';
+import { categoryMeta, categoryOf, type Category } from '../config/categories';
 
 export interface Nav { openCase: (id: string) => void; openAgent: (id: AgentId) => void; go: (v: string) => void }
 
@@ -15,27 +17,23 @@ function startOfWeek() {
   return d.getTime();
 }
 
+/** Nøkkeltall = de fire aktive kategoriene. Samme kategorier som i Saker og i saken. */
 export function useKpis() {
-  const { state } = useStore();
+  const { state, tenant } = useStore();
   return useMemo(() => {
-    const today = new Date().toDateString();
-    const pendingCases = new Set([...state.drafts.filter((d) => d.state === 'pending').map((d) => d.caseId), ...state.cases.filter((c) => c.job && (c.job.stage === 'reported' || c.job.stage === 'controlled')).map((c) => c.id)]);
-    const wk = startOfWeek();
-    return [
-      { key: 'new', label: 'Nye henvendelser i dag', value: state.cases.filter((c) => new Date(c.createdAt).toDateString() === today).length, tone: 'text-info', filter: 'today' },
-      { key: 'approval', label: 'Venter på Espen', value: pendingCases.size, tone: 'text-accent', filter: 'awaiting_approval', emphasis: true },
-      { key: 'customer', label: 'Venter på kunden', value: state.cases.filter((c) => c.status === 'awaiting_customer' || c.status === 'quote_sent').length, tone: 'text-muted', filter: 'awaiting_customer' },
-      { key: 'quotes', label: 'Tilbud under arbeid', value: state.cases.filter((c) => c.status === 'ready_for_quote').length + state.drafts.filter((d) => d.state === 'pending' && d.kind === 'quote').length, tone: 'text-brand', filter: 'ready_for_quote' },
-      { key: 'follow', label: 'Trenger oppfølging', value: state.cases.filter((c) => c.status === 'follow_up' || c.unreadCustomerReply || c.flagged).length, tone: 'text-warn', filter: 'follow_up' },
-      { key: 'closed', label: 'Avsluttet denne uken', value: state.cases.filter((c) => (c.status === 'won' || c.status === 'lost') && new Date(c.updatedAt).getTime() >= wk).length, tone: 'text-ok', filter: 'closed' },
-    ];
-  }, [state.cases, state.drafts]);
+    const n: Record<Category, number> = { owner: 0, working: 0, customer: 0, quote: 0, closed: 0 };
+    for (const c of state.cases) n[categoryOf(c.status)]++;
+    return (['owner', 'working', 'customer', 'quote'] as const).map((k) => ({
+      key: k, label: categoryMeta(k, tenant.owner.firstName).label, value: n[k], filter: k, emphasis: k === 'owner',
+      tone: k === 'owner' ? 'text-accent' : k === 'working' ? 'text-violet' : k === 'quote' ? 'text-info' : 'text-muted',
+    }));
+  }, [state.cases, tenant.owner.firstName]);
 }
 
 function KpiRow({ onPick }: { onPick: (f: string) => void }) {
   const kpis = useKpis();
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       {kpis.map((k) => (
         <button key={k.key} onClick={() => onPick(k.filter)}
           className={cx('card flex flex-col items-start gap-1 px-4 py-3 text-left transition hover:border-faint', k.emphasis && k.value > 0 && 'border-accent/50 bg-accent-soft')}>
@@ -152,8 +150,29 @@ export function ActivityFeed({ items, onOpenCase, limit = 40, compact }: { items
   );
 }
 
+/** «Til deg»: sakene som venter på eieren, øverst på forsiden. */
+function ToYou({ nav, onFilter }: { nav: Nav; onFilter: (f: string) => void }) {
+  const { tenant } = useStore();
+  const { cases, openDraft } = useCasesIn('owner');
+  const shown = cases.slice(0, 12);
+  return (
+    <section className="card overflow-hidden">
+      <div className="flex items-baseline justify-between gap-2 px-4 pb-2 pt-4">
+        <h2 className="font-display text-base font-semibold">Til deg <span className="tnum text-sm font-normal text-muted">{cases.length}</span></h2>
+        <span className="text-xs text-muted">Ingenting sendes før {tenant.owner.firstName} har godkjent og trykket Send</span>
+      </div>
+      {cases.length === 0 ? <p className="px-4 pb-6 pt-2 text-[13px] text-faint">Ingenting venter på deg nå. Agentene sier fra når noe nytt er klart.</p> : (
+        <ul className="divide-y divide-line border-t border-line">
+          {shown.map((c) => <CaseRow key={c.id} c={c} draft={openDraft.get(c.id)} onOpen={() => nav.openCase(c.id)} />)}
+        </ul>
+      )}
+      {cases.length > shown.length && <button className="w-full border-t border-line px-4 py-2.5 text-center text-xs font-semibold text-brand hover:bg-sunk/60" onClick={() => onFilter('owner')}>Vis alle {cases.length}</button>}
+    </section>
+  );
+}
+
 export function Dashboard({ nav, onFilter }: { nav: Nav; onFilter: (f: string) => void }) {
-  const { agents, state, tenant } = useStore();
+  const { state, tenant } = useStore();
   const flagged = [
     ...state.cases.filter((c) => c.flagged && c.status !== 'won' && c.status !== 'lost').map((c) => ({ c, reason: c.flagged!.reason })),
     ...state.cases.filter((c) => c.job?.help).map((c) => ({ c, reason: `${tenant.technicians.find((t) => t.id === c.job!.technicianId)?.firstName} trenger hjelp: ${c.job!.help!.text}` })),
@@ -168,8 +187,6 @@ export function Dashboard({ nav, onFilter }: { nav: Nav; onFilter: (f: string) =
         </div>
       </div>
 
-      <KpiRow onPick={onFilter} />
-
       {flagged.length > 0 && (
         <div className="flex flex-col gap-2">
           {flagged.map(({ c, reason }) => (
@@ -182,18 +199,10 @@ export function Dashboard({ nav, onFilter }: { nav: Nav; onFilter: (f: string) =
         </div>
       )}
 
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="flex min-w-0 flex-col gap-5">
-          <section>
-            <div className="mb-2 flex items-baseline justify-between">
-              <h2 className="font-display text-base font-semibold">Agentkontoret</h2>
-              <span className="text-xs text-muted">{['Ingen', 'Én', 'To', 'Tre', 'Fire', 'Fem'][agents.length] ?? agents.length} digitale medarbeidere · klikk for detaljer</span>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 sm:[&>*:last-child:nth-child(odd)]:col-span-2">
-              {agents.map((a) => <AgentCard key={a.id} view={a} onOpen={() => nav.openAgent(a.id)} />)}
-            </div>
-          </section>
-          <ApprovalQueue nav={nav} />
+          <ToYou nav={nav} onFilter={onFilter} />
+          <KpiRow onPick={onFilter} />
           {tenant.features.projects && <ControlQueue openCase={nav.openCase} />}
         </div>
         <aside className="card flex max-h-[44rem] min-w-0 flex-col p-4 lg:sticky lg:top-20">

@@ -89,7 +89,7 @@ export function createMail(d: MailDeps) {
   }
 
   /** AIOliver lager et utkast og legger saken til godkjenning. */
-  async function createDraft(caseId: string, opts: { kind?: 'reply' | 'info_request' | 'follow_up' | 'quote'; feedback?: string; previous?: { subject: string; body: string } } = {}) {
+  async function createDraft(caseId: string, opts: { kind?: 'reply' | 'info_request' | 'follow_up' | 'quote'; feedback?: string; previous?: { subject: string; body: string }; fromCustomer?: boolean } = {}) {
     const c = (await db.query<any>('SELECT * FROM cases WHERE id = $1 AND tenant_id = $2', [caseId, tenantId])).rows[0];
     if (!c) throw new Error('Fant ikke saken');
     const missing: string[] = c.missing_info ?? [];
@@ -106,8 +106,10 @@ export function createMail(d: MailDeps) {
     await db.query(`INSERT INTO drafts(id, tenant_id, case_id, kind, author, subject, body, rationale, missing, judgement, version, state, reply_to_graph_id, created_at, language, feedback)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13,$14,$15)`,
       [draftId, tenantId, caseId, kind, author, out.subject, out.body, out.rationale, JSON.stringify(out.missing), JSON.stringify(judgement), prev + 1, lastIn?.graph_id ?? null, new Date(now()), out.language, opts.feedback ?? null]);
-    await db.query(`UPDATE cases SET status = 'awaiting_approval', assigned_agent = $2, next_action = $3, updated_at = $4 WHERE id = $1`,
-      [caseId, author, `Les og godkjenn utkastet fra ${author === 'followup' ? 'AINora' : 'AIOliver'}.`, new Date(now())]);
+    // Ny e-post fra kunden flytter saken til «Venter på eieren». Ber eieren selv om et forslag, blir saken der den er.
+    const ownerCat = ['new', 'ai_processing', 'awaiting_approval', 'ready_for_quote', 'follow_up'].includes(c.status);
+    await db.query(`UPDATE cases SET status = CASE WHEN $5 THEN 'awaiting_approval' ELSE status END, assigned_agent = $2, next_action = $3, updated_at = $4 WHERE id = $1`,
+      [caseId, author, `Les og godkjenn utkastet fra ${author === 'followup' ? 'AINora' : 'AIOliver'}.`, new Date(now()), ownerCat || !!opts.fromCustomer]);
     await activity(author, `${author === 'followup' ? 'AINora' : 'AIOliver'} ${opts.previous ? 'skrev utkastet på nytt' : `laget ${kind === 'info_request' ? 'et svarutkast med spørsmål' : kind === 'follow_up' ? 'en oppfølging' : 'et svarutkast'}`} (v${prev + 1}).`, caseId);
     return draftId;
   }
@@ -164,7 +166,7 @@ export function createMail(d: MailDeps) {
       ? `${tenant.owner.firstName} gjorde e-posten fra ${t.customer.name} om til en sak.`
       : `AIEmma registrerte ny henvendelse fra ${t.customer.name}${t.engine === 'regler' ? ' (enkle regler)' : ''}.`, id);
     if (flagged) await activity('coordinator', `AIHenrik: ${flagged.reason}`, id, 'danger');
-    await createDraft(id);
+    await createDraft(id, { fromCustomer: true });
     return id;
   }
 
@@ -217,7 +219,7 @@ export function createMail(d: MailDeps) {
           await logItem(m, 'case', '', existing.id);
           await db.query(`UPDATE cases SET unread = true, updated_at = $2 WHERE id = $1`, [existing.id, new Date(now())]);
           await activity('customer', `${from.name || from.email} svarte i saken.`, existing.id);
-          if (!['won', 'lost'].includes(existing.status)) await createDraft(existing.id);
+          if (!['won', 'lost'].includes(existing.status)) await createDraft(existing.id, { fromCustomer: true });
         } else if (from.email === mailbox) {
           await logItem(m, 'self', 'Sendt fra deg selv');
         } else if (ownDomain && from.email.endsWith(`@${ownDomain}`)) {
@@ -351,8 +353,10 @@ export function createMail(d: MailDeps) {
       VALUES ($1,$2,$3,NULL,$4,'outbound',$5,$6,$7,$8,$9,'confirmed',$10,$11)`,
       [randomUUID(), tenantId, c.id, c.conversation_id, JSON.stringify({ name: tenant.owner.name, email: conn.mailbox }), JSON.stringify([{ name: c.customer.name, email: to }]),
         claimed.subject, claimed.body, at, claimed.author, claimed.decided_by ?? who.email]);
-    await db.query(`UPDATE cases SET status = $2, assigned_agent = 'followup', next_action = 'Venter på svar fra kunden.', updated_at = $3 WHERE id = $1`,
-      [c.id, claimed.kind === 'quote' ? 'quote_sent' : 'awaiting_customer', at]);
+    // «Under arbeid» settes og fjernes bare av eieren; sending av vanlige svar flytter ikke saken ut derfra.
+    const nextStatus = claimed.kind === 'quote' ? 'quote_sent' : c.status === 'in_progress' ? 'in_progress' : 'awaiting_customer';
+    await db.query(`UPDATE cases SET status = $2, assigned_agent = 'followup', next_action = $4, updated_at = $3 WHERE id = $1`,
+      [c.id, nextStatus, at, nextStatus === 'in_progress' ? 'Under arbeid.' : 'Venter på svar fra kunden.']);
     await activity('owner', `${tenant.owner.firstName} sendte e-post til ${to} (bekreftet av Microsoft).`, c.id, 'success');
     return { ok: true };
   }
@@ -529,7 +533,7 @@ export function createMail(d: MailDeps) {
           await insertMessage(existing.id, m, 'inbound', atts);
           await logItem(m, 'case', '', existing.id);
           await activity('owner', `${tenant.owner.firstName} la e-posten «${(m.subject ?? '').slice(0, 80)}» til saken.`, existing.id);
-          await createDraft(existing.id);
+          await createDraft(existing.id, { fromCustomer: true });
           return c.json({ ok: true, caseId: existing.id });
         }
         const from = addr(m.from);
@@ -707,7 +711,7 @@ export function createMail(d: MailDeps) {
       const kase = await caseOf(c.req.param('id'));
       if (!kase) return h.err(c, 404, 'Fant ikke saken.');
       const b = await h.body(c);
-      const statuses = ['new', 'ai_processing', 'awaiting_approval', 'awaiting_customer', 'ready_for_quote', 'quote_sent', 'follow_up', 'won', 'lost'];
+      const statuses = ['new', 'ai_processing', 'awaiting_approval', 'awaiting_customer', 'ready_for_quote', 'quote_sent', 'follow_up', 'in_progress', 'won', 'lost'];
       if (typeof b.status === 'string' && statuses.includes(b.status)) { await db.query('UPDATE cases SET status = $2 WHERE id = $1', [kase.id, b.status]); await activity('owner', `${tenant.owner.firstName} flyttet saken manuelt.`, kase.id); }
       if (typeof b.priority === 'string' && ['low', 'normal', 'high', 'urgent'].includes(b.priority)) await db.query('UPDATE cases SET priority = $2 WHERE id = $1', [kase.id, b.priority]);
       if (b.unread === false) await db.query('UPDATE cases SET unread = false WHERE id = $1', [kase.id]);
