@@ -41,7 +41,7 @@ export interface AppState {
 export interface MailStatus {
   configured: boolean; ai_configured: boolean; mailbox: string; connected: boolean;
   status: 'not_connected' | 'connected' | 'reconnect_required' | string;
-  last_error: string | null; last_sync_at: string | null; connected_at: string | null; sending_enabled: boolean;
+  last_error: string | null; last_sync_at: string | null; connected_at: string | null; sending_enabled: boolean; signature_active?: boolean;
   last_run: { started_at: string; ok: boolean; error: string | null; fetched: number; new_cases: number } | null;
 }
 
@@ -373,18 +373,18 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Godkjenning i to steg (demo-versjon; produksjon overstyrer under) ──────
-  const approveDraft = useCallback(async (draftId: string, edited: { subject: string; body: string; language?: string }) => {
+  const approveDraft = useCallback(async (draftId: string, edited: { subject: string; body: string; language?: string; cc?: string[] }) => {
     const d = ref.current.drafts.find((x) => x.id === draftId);
     if (!d || d.state !== 'pending') return false;
     const changed = edited.subject !== d.subject || edited.body !== d.body;
-    update((s) => ({ ...s, drafts: s.drafts.map((x) => x.id === draftId ? { ...x, state: 'approved', original: { subject: x.subject, body: x.body }, subject: edited.subject, body: edited.body, language: edited.language ?? x.language, editedBy: changed ? owner.email : undefined, decidedBy: owner.email, decidedAt: new Date().toISOString() } : x) }));
+    update((s) => ({ ...s, drafts: s.drafts.map((x) => x.id === draftId ? { ...x, state: 'approved', original: { subject: x.subject, body: x.body }, subject: edited.subject, body: edited.body, language: edited.language ?? x.language, cc: edited.cc ?? x.cc, editedBy: changed ? owner.email : undefined, decidedBy: owner.email, decidedAt: new Date().toISOString() } : x) }));
     audit('draft.approved', `Godkjente ${changed ? 'redigert ' : ''}utkast v${d.version}`, d.caseId);
     log('owner', `${owner.firstName} godkjente utkast v${d.version}. Klart for sending.`, d.caseId, 'success');
     return true;
   }, [update, audit, log, owner]);
 
-  const saveApproved = useCallback(async (draftId: string, b: { subject: string; body: string; email: string; language?: string }) => {
-    update((s) => ({ ...s, drafts: s.drafts.map((x) => x.id === draftId && x.state === 'approved' ? { ...x, subject: b.subject, body: b.body, recipient: b.email, language: b.language ?? x.language, editedBy: owner.email } : x) }));
+  const saveApproved = useCallback(async (draftId: string, b: { subject: string; body: string; email: string; language?: string; cc?: string[] }) => {
+    update((s) => ({ ...s, drafts: s.drafts.map((x) => x.id === draftId && x.state === 'approved' ? { ...x, subject: b.subject, body: b.body, recipient: b.email, language: b.language ?? x.language, cc: b.cc ?? x.cc, editedBy: owner.email } : x) }));
     return true;
   }, [update, owner.email]);
 
@@ -433,9 +433,9 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
       return ok;
     },
     rejectDraft: (draftId: string, reason: string) => { void call(`/api/drafts/${draftId}/reject`, { reason }); },
-    approveDraft: (draftId: string, edited: { subject: string; body: string; language?: string }) =>
+    approveDraft: (draftId: string, edited: { subject: string; body: string; language?: string; cc?: string[] }) =>
       call(`/api/drafts/${draftId}/approve`, edited, 'Godkjent. Ligger klar for sending.'),
-    saveApproved: (draftId: string, b: { subject: string; body: string; email: string; language?: string }) =>
+    saveApproved: (draftId: string, b: { subject: string; body: string; email: string; language?: string; cc?: string[] }) =>
       call(`/api/drafts/${draftId}/text`, b, 'Endringene er lagret.', 'PUT'),
     sendApproved: async (draftId: string) => {
       if (ref.current.sending[draftId]) return false;

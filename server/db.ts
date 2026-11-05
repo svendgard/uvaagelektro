@@ -243,6 +243,20 @@ INSERT INTO triage_log(tenant_id, graph_id, decision, reason, sender_domain, at,
   ON CONFLICT DO NOTHING
 `,
   },
+  {
+    // Kopi (CC) på utkast, og innstillinger per kunde (f.eks. signatur hentet fra Outlook).
+    version: 6,
+    sql: `
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS cc jsonb NOT NULL DEFAULT '[]'::jsonb;
+CREATE TABLE IF NOT EXISTS tenant_settings (
+  tenant_id text NOT NULL,
+  key text NOT NULL,
+  value jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, key)
+)
+`,
+  },
 ];
 
 export async function migrate(db: Db): Promise<void> {

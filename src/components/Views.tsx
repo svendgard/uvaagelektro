@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import { AttachmentChip, MailBody } from './CaseDetail';
-import { MailConnectionCard } from './MailConnection';
+import { MailConnectionCard, SignatureCard } from './MailConnection';
 import { previewText } from '../lib/cleanMail';
 import { useStore } from '../state/store';
 import { AUTOMATION_LEVELS } from '../config/tenant';
@@ -225,7 +225,7 @@ export function SettingsView({ isSuperadmin = false, canConnect = false }: { isS
           <Icon name="plug" className="h-5 w-5 text-warn" />
           <span><b>Status: simulert.</b> Ingen ekte e-post sendes eller mottas i denne prototypen. Konto som speiles: {tenant.mail.mailbox}.</span>
         </div>
-      </section> : <MailConnectionCard isSuperadmin={isSuperadmin} canConnect={canConnect} />}
+      </section> : <><MailConnectionCard isSuperadmin={isSuperadmin} canConnect={canConnect} /><SignatureCard /></>}
 
       {DEMO && <section className="card p-5">
         <h2 className="mb-1 font-display text-base font-semibold">Roller og tilgang</h2>

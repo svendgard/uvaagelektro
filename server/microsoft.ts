@@ -170,27 +170,69 @@ export class Graph {
 
   /**
    * Svar i samme tråd. Lager et svarutkast i Outlook (med sitert tråd), legger vår tekst øverst som HTML
-   * slik at avsnitt, linjeskift og signatur blir som i Agentkontoret, justerer emne/mottaker og sender.
+   * slik at avsnitt, linjeskift og signatur blir som i Agentkontoret, setter mottaker og kopi, legger ved
+   * signaturens bilder (logo) og sender.
    */
-  async reply(messageId: string, text: string, subject?: string, to?: string): Promise<{ draftId: string }> {
-    const draft = await this.call<{ id: string; subject?: string; toRecipients?: GraphAddress[]; body?: { contentType: string; content: string } }>(
+  async reply(messageId: string, text: string, o: SendOptions = {}): Promise<{ draftId: string }> {
+    const draft = await this.call<{ id: string; subject?: string; body?: { contentType: string; content: string } }>(
       'POST', `/me/messages/${encodeURIComponent(messageId)}/createReply`, {}, { Prefer: 'outlook.body-content-type="html"' });
-    const ours = textToHtml(text);
+    const ours = composeHtml(text, o.signatureHtml);
     const quoted = draft.body?.content ?? '';
     const content = /<body[^>]*>/i.test(quoted) ? quoted.replace(/<body[^>]*>/i, (m) => `${m}${ours}`) : `${ours}${quoted}`;
     const patch: Record<string, unknown> = { body: { contentType: 'HTML', content } };
-    if (subject && subject !== draft.subject) patch.subject = subject;
-    if (to && !(draft.toRecipients ?? []).some((r) => r.emailAddress.address?.toLowerCase() === to.toLowerCase())) patch.toRecipients = [{ emailAddress: { address: to } }];
+    if (o.subject && o.subject !== draft.subject) patch.subject = o.subject;
+    if (o.to) patch.toRecipients = [{ emailAddress: { address: o.to } }];
+    if (o.cc) patch.ccRecipients = o.cc.map((address) => ({ emailAddress: { address } }));
     await this.call('PATCH', `/me/messages/${encodeURIComponent(draft.id)}`, patch);
+    await this.addInlineImages(draft.id, o.images);
     await this.call('POST', `/me/messages/${encodeURIComponent(draft.id)}/send`);
     return { draftId: draft.id };
   }
 
   /** Ny e-post (når det ikke finnes en innkommende e-post å svare på). */
-  async sendNew(to: string, subject: string, text: string): Promise<void> {
-    await this.call('POST', '/me/sendMail', { message: { subject, body: { contentType: 'HTML', content: textToHtml(text) }, toRecipients: [{ emailAddress: { address: to } }] }, saveToSentItems: true });
+  async sendNew(to: string, subject: string, text: string, o: SendOptions = {}): Promise<void> {
+    const draft = await this.call<{ id: string }>('POST', '/me/messages', {
+      subject, body: { contentType: 'HTML', content: composeHtml(text, o.signatureHtml) },
+      toRecipients: [{ emailAddress: { address: to } }],
+      ccRecipients: (o.cc ?? []).map((address) => ({ emailAddress: { address } })),
+    });
+    await this.addInlineImages(draft.id, o.images);
+    await this.call('POST', `/me/messages/${encodeURIComponent(draft.id)}/send`);
+  }
+
+  private async addInlineImages(draftId: string, images?: { contentId: string; name: string; contentType: string; base64: string }[]) {
+    for (const img of images ?? []) {
+      await this.call('POST', `/me/messages/${encodeURIComponent(draftId)}/attachments`, {
+        '@odata.type': '#microsoft.graph.fileAttachment', name: img.name, contentType: img.contentType, contentBytes: img.base64, isInline: true, contentId: img.contentId,
+      });
+    }
+  }
+
+  /** Siste sendte e-poster som HTML (for å finne signaturen). */
+  async recentSentHtml(n = 25): Promise<{ id: string; body?: { contentType: string; content: string } }[]> {
+    const r = await this.call<{ value: { id: string; body?: { contentType: string; content: string } }[] }>('GET',
+      `/me/mailFolders/sentitems/messages?$top=${n}&$orderby=sentDateTime desc&$select=id,body`, undefined, { Prefer: 'outlook.body-content-type="html"' });
+    return r.value;
+  }
+
+  /** Innebygde bilder i en e-post, med innhold (base64). */
+  async inlineImages(messageId: string): Promise<{ contentId: string; name: string; contentType: string; base64: string; size: number }[]> {
+    const r = await this.call<{ value: { name: string; contentType: string; size: number; isInline?: boolean; contentId?: string; contentBytes?: string }[] }>(
+      'GET', `/me/messages/${encodeURIComponent(messageId)}/attachments`);
+    return r.value.filter((a) => a.contentId && a.contentBytes && a.contentType?.startsWith('image/'))
+      .map((a) => ({ contentId: a.contentId!.replace(/^<|>$/g, ''), name: a.name, contentType: a.contentType, base64: a.contentBytes!, size: a.size }));
   }
 }
+
+export interface SendOptions {
+  subject?: string;
+  to?: string;
+  cc?: string[];
+  /** Eierens signatur fra Outlook (HTML). Bildene i den (logo) sendes som innebygde vedlegg. */
+  signatureHtml?: string;
+  images?: { contentId: string; name: string; contentType: string; base64: string }[];
+}
+
 
 const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -198,11 +240,19 @@ const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
  * Ren tekst til e-post-HTML: tom linje = nytt avsnitt, linjeskift = <br>. Samme skrift som Outlook bruker som standard.
  * Lenker gjøres klikkbare. Ingen annen formatering, så e-posten ser ut som om Espen skrev den selv.
  */
+const FONT = 'font-family:Aptos,Calibri,Arial,Helvetica,sans-serif;font-size:11pt;color:#000000';
+
+/** Vår tekst + eierens signatur (hvis den finnes). */
+export function composeHtml(text: string, signatureHtml?: string): string {
+  if (!signatureHtml) return textToHtml(text);
+  return `${textToHtml(text).replace(/<br>$/, '')}<div style="${FONT}">${signatureHtml}</div><br>`;
+}
+
 export function textToHtml(text: string): string {
   const linkify = (t: string) => esc(t).replace(/\bhttps?:\/\/[^\s<>"]+[^\s<>".,;:!?)]/g, (u) => `<a href="${u}">${u}</a>`);
   const paras = text.replace(/\r\n?/g, '\n').trim().split(/\n{2,}/)
     .map((p) => `<p style="margin:0 0 11pt 0">${p.split('\n').map(linkify).join('<br>')}</p>`).join('');
-  return `<div style="font-family:Aptos,Calibri,Arial,Helvetica,sans-serif;font-size:11pt;color:#000000">${paras}</div><br>`;
+  return `<div style="${FONT}">${paras}</div><br>`;
 }
 
 export const addr = (a?: GraphAddress) => ({ name: a?.emailAddress?.name ?? a?.emailAddress?.address ?? '', email: (a?.emailAddress?.address ?? '').toLowerCase() });

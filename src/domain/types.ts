@@ -107,6 +107,8 @@ export interface Draft {
   rewritten?: boolean;
   /** Beskjeden som ble gitt ved «Skriv på nytt». */
   feedback?: string;
+  /** Kopi (CC). Standard: alle som var med på e-posten det svares på. */
+  cc?: string[];
 }
 
 export interface Customer {

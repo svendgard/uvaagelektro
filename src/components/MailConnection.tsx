@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { api } from '../lib/api';
 import { useStore } from '../state/store';
 import { Icon } from './ui';
 import { cx, fmtDateTime } from '../lib/util';
@@ -100,6 +101,45 @@ export function MailConnectionCard({ isSuperadmin, canConnect }: { isSuperadmin:
           )}
         </>
       )}
+    </section>
+  );
+}
+
+type SigView = { status: 'none' | 'not_found' | 'active' | 'inactive'; fetchedAt?: string; preview?: string; images?: number };
+
+/** Signaturen fra Outlook: forhåndsvisning, hent på nytt, slå av/på. */
+export function SignatureCard() {
+  const { state, actions } = useStore();
+  const [sig, setSig] = useState<SigView | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = () => api<SigView>('/api/mail/signature').then(setSig).catch(() => setSig(null));
+  useEffect(() => { void load(); }, [state.mail?.connected]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!state.mail?.connected) return null;
+  const run = async (fn: () => Promise<SigView>, ok: string) => {
+    setBusy(true);
+    try { setSig(await fn()); actions.toast(ok, 'success'); void actions.refresh(); }
+    catch (e) { actions.toast(e instanceof Error ? e.message : 'Noe gikk galt.', 'danger'); }
+    finally { setBusy(false); }
+  };
+  return (
+    <section className="card p-5">
+      <h2 className="mb-1 font-display text-base font-semibold">E-postsignatur</h2>
+      <p className="mb-3 text-[13px] text-muted">Hentes fra e-poster du har sendt fra Outlook, så svar fra Agentkontoret får nøyaktig samme signatur, med logo.</p>
+      {!sig ? <p className="text-[13px] text-muted">Henter …</p> : <>
+        <p className="mb-2 text-[13px]">
+          {sig.status === 'active' && <><b className="text-ok">I bruk.</b> Legges til automatisk i alle e-poster.</>}
+          {sig.status === 'inactive' && <><b>Slått av.</b> E-poster sendes med tekstsignatur.</>}
+          {sig.status === 'not_found' && <><b>Fant ingen signatur</b> i de siste sendte e-postene. Send en e-post fra Outlook på PC med signaturen, og trykk «Hent på nytt».</>}
+          {sig.status === 'none' && <>Hentes automatisk ved neste synkronisering.</>}
+          {sig.fetchedAt && <span className="text-muted"> · Hentet {fmtDateTime(sig.fetchedAt)}</span>}
+        </p>
+        {sig.preview && <iframe title="Signatur" sandbox="" srcDoc={`<!doctype html><meta charset="utf-8"><body style="margin:8px;font-family:Calibri,Arial,sans-serif;font-size:11pt">${sig.preview}</body>`} className="mb-3 h-44 w-full rounded-lg border border-line bg-white" />}
+        <div className="flex flex-wrap gap-2">
+          <button className="btn btn-ghost" disabled={busy} onClick={() => void run(() => api('/api/mail/signature/refresh', { body: {} }), 'Signaturen er hentet på nytt.')}><Icon name="refresh" />Hent på nytt</button>
+          {sig.status === 'active' && <button className="btn btn-ghost" disabled={busy} onClick={() => void run(() => api('/api/mail/signature', { body: { active: false } }), 'Signaturen er slått av.')}>Slå av</button>}
+          {sig.status === 'inactive' && <button className="btn btn-primary" disabled={busy} onClick={() => void run(() => api('/api/mail/signature', { body: { active: true } }), 'Signaturen er slått på.')}>Slå på</button>}
+        </div>
+      </>}
     </section>
   );
 }

@@ -9,6 +9,7 @@ import { DEMO } from '../demo';
 import { JobPanel, JobStageBadge } from './Projects';
 import { cx, fmtDateTime, kr } from '../lib/util';
 import { cleanMail, linkify } from '../lib/cleanMail';
+import { api } from '../lib/api';
 
 /** Ren e-posttekst: bannere, plassholdere og sitert historikk ryddes bort. Lenker vises kort og klikkbart. */
 export function MailBody({ body }: { body: string }) {
@@ -63,7 +64,7 @@ function Message({ m }: { m: EmailMessage }) {
           <span className="break-anywhere min-w-0"><b className="text-[13px] text-ink">{m.from.name}</b> <span className="text-muted">&lt;{m.from.email}&gt;</span></span>
           <time className="text-faint" dateTime={m.sentAt}>{fmtDateTime(m.sentAt)}</time>
         </header>
-        <p className="break-anywhere mb-1 text-xs text-muted">Til: {m.to.map((t) => t.email).join(', ')} · <span className="font-semibold text-ink">{m.subject}</span></p>
+        <p className="break-anywhere mb-1 text-xs text-muted">Til: {m.to.map((t) => t.email).join(', ')}{m.cc && m.cc.length > 0 && <> · Kopi: {m.cc.map((t) => t.email).join(', ')}</>} · <span className="font-semibold text-ink">{m.subject}</span></p>
         <MailBody body={m.body} />
         {m.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{m.attachments.map((a) => <AttachmentChip key={a.id} a={a} messageId={m.id} />)}</div>}
       </div>
@@ -83,9 +84,9 @@ function Message({ m }: { m: EmailMessage }) {
 /** Skyggemodus: agentene leser og foreslår, men ingenting sendes fra Agentkontoret. */
 export const useShadowMode = () => { const { state } = useStore(); return !DEMO && !(state.mail?.connected && state.mail.sending_enabled); };
 
-function CopyButton({ text, label = 'Kopier tekst' }: { text: string; label?: string }) {
+function CopyButton({ text, label = 'Kopier tekst', subtle = false }: { text: string; label?: string; subtle?: boolean }) {
   const [done, setDone] = useState(false);
-  return <button className="btn btn-accent" onClick={async () => { try { await navigator.clipboard.writeText(text); setDone(true); setTimeout(() => setDone(false), 2000); } catch { /* utilgjengelig */ } }}><Icon name={done ? 'check' : 'file'} />{done ? 'Kopiert' : label}</button>;
+  return <button className={subtle ? 'btn btn-ghost' : 'btn btn-accent'} onClick={async () => { try { await navigator.clipboard.writeText(text); setDone(true); setTimeout(() => setDone(false), 2000); } catch { /* utilgjengelig */ } }}><Icon name={done ? 'check' : 'file'} />{done ? 'Kopiert' : label}</button>;
 }
 
 const LANG_BUTTONS = [['no', 'Norsk'], ['en', 'Engelsk'], ['sv', 'Svensk'], ['da', 'Dansk']] as const;
@@ -93,7 +94,7 @@ const LANG_BUTTONS = [['no', 'Norsk'], ['en', 'Engelsk'], ['sv', 'Svensk'], ['da
 /** Ulagrede endringer i skjemaet tas vare på i nettleseren, så de overlever at siden oppdateres. */
 function useDraftForm(d: Draft) {
   const key = `ak-utkast:${d.id}:${d.state === 'pending' ? 'forslag' : 'send'}`;
-  const saved = { subject: d.subject, body: d.body, email: d.recipient ?? '', language: d.language ?? 'no' };
+  const saved = { subject: d.subject, body: d.body, email: d.recipient ?? '', language: d.language ?? 'no', cc: d.cc ?? [] as string[] };
   const read = () => { try { const v = sessionStorage.getItem(key); return v ? { ...saved, ...JSON.parse(v) } : saved; } catch { return saved; } };
   const [form, setForm] = useState(read);
   useEffect(() => { setForm(read()); }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -103,15 +104,69 @@ function useDraftForm(d: Draft) {
     return next;
   });
   const reset = () => { try { sessionStorage.removeItem(key); } catch { /* */ } setForm(saved); };
-  const dirty = form.subject !== saved.subject || form.body !== saved.body || form.email !== saved.email;
+  const dirty = form.subject !== saved.subject || form.body !== saved.body || form.email !== saved.email || (form.cc ?? []).join(',') !== saved.cc.join(',');
   return { form, set, reset, dirty, clear: () => { try { sessionStorage.removeItem(key); } catch { /* */ } } };
+}
+
+const EMAIL_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+
+/** Kopi (CC): fjern med ×, legg til ved å skrive adressen og trykke Enter, komma eller «Legg til». */
+function CcField({ id, value, onChange, disabled }: { id: string; value: string[]; onChange: (cc: string[]) => void; disabled?: boolean }) {
+  const [input, setInput] = useState('');
+  const [error, setError] = useState('');
+  const add = () => {
+    const parts = input.split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
+    if (!parts.length) return;
+    const bad = parts.find((x) => !EMAIL_RE.test(x));
+    if (bad) { setError(`Ugyldig adresse: ${bad}`); return; }
+    onChange([...new Set([...value, ...parts])].slice(0, 10)); setInput(''); setError('');
+  };
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-xs font-semibold text-muted" htmlFor={id}>Kopi</label>
+      <div className="field flex flex-wrap items-center gap-1.5 !py-1.5">
+        {value.map((e) => (
+          <span key={e} className="break-anywhere inline-flex max-w-full items-center gap-1 rounded-full bg-sunk px-2 py-0.5 text-xs font-semibold">
+            {e}
+            {!disabled && <button type="button" aria-label={`Fjern ${e} fra kopi`} className="text-muted hover:text-bad" onClick={() => onChange(value.filter((x) => x !== e))}><Icon name="x" className="h-3 w-3" /></button>}
+          </span>
+        ))}
+        {!disabled && <input id={id} type="email" inputMode="email" value={input} placeholder={value.length ? 'Legg til …' : 'Ingen på kopi. Skriv e-postadresse'}
+          onChange={(e) => { setInput(e.target.value); setError(''); }}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); add(); } }}
+          onBlur={() => input.trim() && add()}
+          className="min-w-[10rem] flex-1 bg-transparent text-[13px] outline-none" />}
+      </div>
+      {error && <p className="text-xs text-bad">{error}</p>}
+    </div>
+  );
+}
+
+/** Viser at Outlook-signaturen (med logo) legges til automatisk, med forhåndsvisning. */
+function SignatureNote() {
+  const [open, setOpen] = useState(false);
+  const [html, setHtml] = useState<string | null>(null);
+  const toggle = async () => {
+    setOpen((v) => !v);
+    if (html === null) { try { const r = await api<{ preview?: string }>('/api/mail/signature'); setHtml(r.preview ?? ''); } catch { setHtml(''); } }
+  };
+  return (
+    <div className="text-xs text-muted">
+      <button type="button" onClick={() => void toggle()} className="inline-flex items-center gap-1 font-semibold hover:text-ink">
+        <Icon name="check" className="h-3.5 w-3.5 text-ok" />Signaturen din fra Outlook (med logo) legges til automatisk · {open ? 'Skjul' : 'Vis'}
+      </button>
+      {open && (html === null ? <p className="mt-1">Henter …</p>
+        : html ? <iframe title="Signatur" sandbox="" srcDoc={`<!doctype html><meta charset="utf-8"><body style="margin:8px;font-family:Calibri,Arial,sans-serif;font-size:11pt">${html}</body>`} className="mt-1 h-40 w-full rounded-lg border border-line bg-white" />
+        : <p className="mt-1">Fant ikke signaturen.</p>)}
+    </div>
+  );
 }
 
 function ApprovalPanel({ d }: { d: Draft }) {
   const { tenant, state, actions } = useStore();
   const ag = tenant.agents.find((a) => a.id === d.author);
   const { form, set, reset, dirty, clear } = useDraftForm(d);
-  const [mode, setMode] = useState<'view' | 'reject' | 'regen' | 'confirm'>('view');
+  const [mode, setMode] = useState<'view' | 'reject' | 'regen'>('view');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState<null | 'approve' | 'save' | 'send' | 'translate' | 'rewrite'>(null);
   useEffect(() => { setMode('view'); setNote(''); }, [d.id, d.state]);
@@ -124,12 +179,13 @@ function ApprovalPanel({ d }: { d: Draft }) {
   const kindLabel = { reply: 'svarutkast', info_request: 'svarutkast med spørsmål', quote: 'tilbudsutkast', follow_up: 'oppfølgingsmelding', extra_work: 'spørsmål om tilleggsarbeid' }[d.kind];
   const run = async (what: NonNullable<typeof busy>, fn: () => Promise<unknown>) => { setBusy(what); try { return await fn(); } finally { setBusy(null); } };
 
-  const approve = () => run('approve', async () => { if (await actions.approveDraft(d.id, { subject: form.subject, body: form.body, language: form.language })) clear(); });
-  const save = () => run('save', async () => { if (await actions.saveApproved(d.id, { subject: form.subject, body: form.body, email: form.email, language: form.language })) clear(); });
+  const approve = () => run('approve', async () => { if (await actions.approveDraft(d.id, { subject: form.subject, body: form.body, language: form.language, cc: form.cc })) clear(); });
+  const fields = () => ({ subject: form.subject, body: form.body, email: form.email, language: form.language, cc: form.cc });
+  const save = () => run('save', async () => { if (await actions.saveApproved(d.id, fields())) clear(); });
+  // To klikk totalt: «Godkjenn», så «Send». Ulagrede endringer lagres før sending.
   const send = () => run('send', async () => {
-    if (dirty && !(await actions.saveApproved(d.id, { subject: form.subject, body: form.body, email: form.email, language: form.language }))) return;
+    if (dirty && !(await actions.saveApproved(d.id, fields()))) return;
     if (await actions.sendApproved(d.id)) clear();
-    setMode('view');
   });
   const translateTo = (lang: string) => run('translate', async () => {
     const r = await actions.translateDraft(d.id, lang, form.subject, form.body);
@@ -185,6 +241,7 @@ function ApprovalPanel({ d }: { d: Draft }) {
           <label className="text-xs font-semibold text-muted" htmlFor={`to-${d.id}`}>Til</label>
           <input id={`to-${d.id}`} type="email" className="field" value={form.email} placeholder={kase.customer.email} onChange={(e) => set({ email: e.target.value })} disabled={sending || !canAct} />
         </>}
+        <CcField id={`cc-${d.id}`} value={form.cc ?? []} onChange={(cc) => set({ cc })} disabled={sending || !canAct} />
         <label className="text-xs font-semibold text-muted" htmlFor={`subj-${d.id}`}>Emne</label>
         <input id={`subj-${d.id}`} className="field" value={form.subject} onChange={(e) => set({ subject: e.target.value })} disabled={sending || !canAct} />
         <div className="flex flex-wrap items-end justify-between gap-2">
@@ -199,6 +256,7 @@ function ApprovalPanel({ d }: { d: Draft }) {
           )}
         </div>
         <textarea id={`body-${d.id}`} className="field min-h-[200px] font-sans leading-relaxed" value={form.body} onChange={(e) => set({ body: e.target.value })} disabled={sending || !canAct} />
+        {!DEMO && state.mail?.signature_active && <SignatureNote />}
         {dirty && !sending && (
           <p className="flex flex-wrap items-center gap-2 text-xs font-semibold text-accent-ink">
             {inQueue ? 'Ulagrede endringer.' : 'Endret – det er denne versjonen som godkjennes.'}
@@ -232,19 +290,15 @@ function ApprovalPanel({ d }: { d: Draft }) {
           <button className="btn btn-danger" disabled={!!busy || !canAct} onClick={() => { setMode('reject'); setNote(''); }}><Icon name="x" />Avvis</button>
         </>}
         {inQueue && <>
-          {!shadow && mode !== 'confirm' && (
-            <button className="btn btn-accent" disabled={sending || !!busy || !canAct} onClick={() => setMode('confirm')}>
-              {sending ? <><span className="h-2 w-2 rounded-full bg-white pulse" />Sender · venter på bekreftelse</> : <><Icon name="send" />{d.error ? 'Prøv å sende igjen' : 'Send'}</>}
+          {!shadow && (
+            <button className="btn btn-accent" disabled={sending || !!busy || !canAct} onClick={() => void send()}>
+              {sending || busy === 'send' ? <><span className="h-2 w-2 rounded-full bg-white pulse" />Sender · venter på bekreftelse</> : <><Icon name="send" />{d.error ? 'Prøv å sende igjen' : `Send til ${to}`}</>}
             </button>
           )}
-          {!shadow && mode === 'confirm' && <>
-            <button className="btn btn-accent" disabled={!!busy} onClick={() => void send()}><Icon name="send" />{busy === 'send' ? 'Sender …' : `Bekreft: send til ${to}`}</button>
-            <button className="btn btn-ghost" disabled={!!busy} onClick={() => setMode('view')}>Avbryt</button>
-          </>}
-          {dirty && mode !== 'confirm' && !sending && <button className="btn btn-ghost" disabled={!!busy || !canAct} onClick={() => void save()}>{busy === 'save' ? 'Lagrer …' : 'Lagre endringer'}</button>}
-          {mode !== 'confirm' && !sending && <>
+          {dirty && !sending && <button className="btn btn-ghost" disabled={!!busy || !canAct} onClick={() => void save()}>{busy === 'save' ? 'Lagrer …' : 'Lagre endringer'}</button>}
+          {!sending && <>
             <a className="btn btn-ghost" href={mailto}><Icon name="mail" />Åpne i e-post</a>
-            <CopyButton text={form.body} />
+            <CopyButton text={form.body} subtle={!shadow} />
             <button className="btn btn-ghost" disabled={!!busy || !canAct} onClick={() => { setMode('regen'); setNote(''); }}><Icon name="refresh" />Skriv på nytt</button>
             <button className="btn btn-danger" disabled={!!busy || !canAct} onClick={() => { setMode('reject'); setNote(''); }}><Icon name="x" />Avvis</button>
           </>}
@@ -252,7 +306,7 @@ function ApprovalPanel({ d }: { d: Draft }) {
       </div>
       <p className="mt-2 text-[11px] text-muted">
         {!canAct ? <>Din rolle kan lese, men ikke godkjenne eller sende.</>
-          : !inQueue ? <>Ingenting sendes når du godkjenner. Godkjente utkast legges klare for sending, og du sender med et eget klikk.</>
+          : !inQueue ? <>Ingenting sendes når du godkjenner. Deretter trykker du «Send».</>
           : shadow ? <>Sending fra Agentkontoret er slått av. Åpne i e-post eller kopier teksten, og send fra Outlook. Svaret ditt knyttes til saken automatisk.</>
           : <>Sendes fra {tenant.mail.mailbox} i samme e-posttråd. Meldingen vises som sendt først når Microsoft har bekreftet.</>}
       </p>
@@ -267,7 +321,6 @@ function Composer({ caseId, onDone }: { caseId: string; onDone: () => void }) {
   const [subject, setSubject] = useState(last ? (last.subject.startsWith('SV:') ? last.subject : `SV: ${last.subject}`) : c.title);
   const [body, setBody] = useState(`Hei ${c.customer.name.split(' ')[0]},\n\n\n\n${tenant.signature}`);
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState(false);
   const shadow = useShadowMode();
   return (
     <section className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-4">
@@ -277,16 +330,12 @@ function Composer({ caseId, onDone }: { caseId: string; onDone: () => void }) {
       <label className="sr-only" htmlFor={`mb-${caseId}`}>Melding</label>
       <textarea id={`mb-${caseId}`} className="field min-h-[160px]" value={body} onChange={(e) => setBody(e.target.value)} />
       <div className="flex flex-wrap items-center gap-2">
-        {shadow ? <CopyButton text={body} /> : !confirm ? (
-          <button className="btn btn-primary" disabled={busy || state.role !== 'owner' || !body.trim()} onClick={() => setConfirm(true)}>
-            <Icon name="send" />Send
-          </button>
-        ) : (
-          <button className="btn btn-accent" disabled={busy} onClick={async () => { setBusy(true); await actions.sendManual(caseId, subject, body); setBusy(false); onDone(); }}>
-            <Icon name="send" />{busy ? 'Sender …' : `Bekreft: send til ${c.customer.email}`}
+        {shadow ? <CopyButton text={body} /> : (
+          <button className="btn btn-primary" disabled={busy || state.role !== 'owner' || !body.trim()} onClick={async () => { setBusy(true); await actions.sendManual(caseId, subject, body); setBusy(false); onDone(); }}>
+            <Icon name="send" />{busy ? 'Sender …' : `Send til ${c.customer.email}`}
           </button>
         )}
-        <button className="btn btn-ghost" onClick={() => (confirm ? setConfirm(false) : onDone())}>Avbryt</button>
+        <button className="btn btn-ghost" onClick={onDone}>Avbryt</button>
       </div>
       {shadow && <p className="text-[11px] text-muted">Sending er av (skyggemodus). Kopier teksten og send fra Outlook.</p>}
     </section>
