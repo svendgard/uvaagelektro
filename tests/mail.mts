@@ -33,6 +33,10 @@ const fakeFetch: typeof fetch = async (input: any, init: any = {}) => {
   const url = String(input);
   const method = init.method ?? 'GET';
   calls.push({ url, method, body: typeof init.body === 'string' ? init.body : undefined });
+  if (url.includes('/mailFolders/sentitems/messages?$top=50')) return json({ value: [
+    { id: 'st1', subject: 'SV: Lys', toRecipients: [{ emailAddress: { address: 'kunde@test.no' } }], body: { contentType: 'text', content: 'Hei Per,\n\nDet ordner vi. Kommer tirsdag kl 8.\n\nMvh\nEspen Uvaag Halvorsen\nDaglig leder\nM: +47 458 70 500\n\nFra: Per <per@test.no>\nSendt: mandag\nTil: Espen\nEmne: Lys\n\nHei, kan dere fikse lyset?' } },
+    { id: 'st2', subject: 'Intern', toRecipients: [{ emailAddress: { address: 'kollega@uvaagelektro.no' } }], body: { contentType: 'text', content: 'Hei, husk kabel i morgen. Dette er intern e-post som ikke skal brukes.' } },
+  ] });
   if (url.includes('/mailFolders/sentitems/messages?$top=25')) return json({ value: [{ id: 'sig-1', body: { contentType: 'html', content: '<html><body><p>Hei</p><p class=MsoNormal><a name="_MailAutoSig">Med vennlig hilsen/Regards</a></p><p><b>Espen Uvaag Halvorsen</b></p><p><img src="cid:logo1"></p><div id="divRplyFwdMsg">Fra: x</div></body></html>' } }] });
   if (url.endsWith('/me/messages/sig-1/attachments')) return json({ value: [{ name: 'logo.png', contentType: 'image/png', size: 5000, isInline: true, contentId: 'logo1', contentBytes: 'QUJD' }] });
   if (method === 'POST' && url.endsWith('/me/messages')) return json({ id: 'new-1' });
@@ -56,11 +60,13 @@ const fakeFetch: typeof fetch = async (input: any, init: any = {}) => {
   if (url.includes('api.anthropic.com')) {
     const b = JSON.parse(init.body);
     const user: string = b.messages[0].content;
+    if (b.tools[0].name === 'beskriv_stil') return json({ content: [{ type: 'tool_use', name: 'beskriv_stil', input: { stil: 'Kort og direkte. Åpner med «Hei <navn>,». Avslutter med «Mvh».' } }] });
     if (b.tools[0].name === 'oversatt') return json({ content: [{ type: 'tool_use', name: 'oversatt', input: { subject: 'RE: EV charger', body: 'Hi Test,\n\nThanks for your enquiry.' } }] });
     if (b.tools[0].name === 'registrer_vurdering') {
-      const isNews = user.includes('Kampanje');
+      const isNews = user.includes('Kampanje') || user.includes('Til orientering');
+      const ownerAction = user.includes('RIX') ? 'venter_pa_andre' : 'eier_svarer';
       return json({ content: [{ type: 'tool_use', name: 'registrer_vurdering', input: isNews ? { is_customer_inquiry: false, reason: 'Reklame fra leverandør', job_type: 'feilsoking', customer: { name: 'x', email: 'x' }, title: 'x', summary: 'x', missing_info: [], priority: 'low', urgent: { is_urgent: false }, injection_suspected: false }
-        : { is_customer_inquiry: true, reason: 'Ber om tilbud', job_type: 'elbillader', customer: { name: 'Test Kunde', email: 'kunde@test.no', phone: '400 00 000', address: 'Testveien 1' }, title: 'Elbillader i carport', summary: 'Kunden vil ha elbillader.', missing_info: ['Størrelse på hovedsikring'], priority: 'normal', urgent: { is_urgent: false }, injection_suspected: false } }] });
+        : { is_customer_inquiry: true, reason: 'Ber om tilbud', job_type: 'elbillader', customer: { name: 'Test Kunde', email: 'kunde@test.no', phone: '400 00 000', address: 'Testveien 1' }, title: 'Elbillader i carport', summary: 'Kunden vil ha elbillader.', missing_info: ['Størrelse på hovedsikring'], priority: 'normal', urgent: { is_urgent: false }, injection_suspected: false, owner_action: ownerAction } }] });
     }
     return json({ content: [{ type: 'tool_use', name: 'lag_utkast', input: { subject: 'SV: Elbillader', body: `Hei Test,\n\nTakk for henvendelsen.\n\n${uvaagElektro.signature}`, rationale: 'Ber om hovedsikring.', missing: ['Størrelse på hovedsikring'], requires_human_judgement: [] } }] });
   }
@@ -391,6 +397,44 @@ assert.equal((await espen.req('GET', '/api/mail/status')).json.signature_active,
 assert.equal((await espen.req('POST', '/api/mail/signature', { active: true })).json.status, 'active');
 ok('Kopi som standard fra mottatt e-post; signaturen fra Outlook kan forhåndsvises og slås av/på');
 
+// 10h. Skrivestil fra Espens sendte e-poster brukes i svarforslag. Kopi-e-post vurderes.
+const style = (await pg.query<any>(`SELECT value FROM tenant_settings WHERE key = 'style'`)).rows[0]?.value;
+assert.ok(style, 'skrivestil hentet');
+assert.deepEqual(style.examples, ['Hei Per,\n\nDet ordner vi. Kommer tirsdag kl 8.\n\nMvh'], 'bare egen tekst til kunder, uten signatur og sitert tråd');
+assert.match(style.summary, /Kort og direkte/);
+const draftCalls = calls.filter((c) => c.url.includes('anthropic') && c.body!.includes('lag_utkast'));
+const lastDraftCall = draftCalls.at(-1)!.body!;
+assert.ok(lastDraftCall.includes('<eksempel>') && lastDraftCall.includes('Det ordner vi'), 'eksempler i prompten');
+assert.ok(lastDraftCall.includes('Ikke gjenta eller oppsummer det kunden har skrevet'));
+ok('Skrivestil hentes fra Espens sendte e-poster til kunder og brukes i svarforslag');
+
+const draftsBefore = (await pg.query<any>('SELECT count(*)::int AS n FROM drafts')).rows[0].n;
+inbox.push(
+  msg('n1', 'conv-n1', 'nina@kunde.no', 'Nina Halvorsen', 'Rørarbeid bad', 'Hei RIX og Joakim, når kan dere starte på badet? Elektriker er Uvaag.', '2026-10-23T11:40:00Z', {
+    toRecipients: [{ emailAddress: { address: 'post@rix.no' } }, { emailAddress: { address: 'joakim@rix.no' } }], ccRecipients: [{ emailAddress: { address: 'espen@uvaagelektro.no' } }] }),
+  msg('n2', 'conv-n2', 'info@leverandor.no', 'Leverandør', 'Prisendring', 'Til orientering: nye priser fra januar.', '2026-10-23T11:41:00Z', {
+    toRecipients: [{ emailAddress: { address: 'kunder@leverandor.no' } }], ccRecipients: [{ emailAddress: { address: 'espen@uvaagelektro.no' } }] }),
+);
+clock = Date.parse('2026-10-23T11:45:00Z');
+await mail.syncOnce();
+let stN = (await espen.req('GET', '/api/state')).json;
+const n1 = stN.inbox.find((x: any) => x.id === 'n1');
+const n1Case = stN.cases.find((c: any) => c.id === n1.caseId);
+assert.equal(n1Case.status, 'awaiting_customer', 'på kopi, andre skal svare: Venter på kunde');
+assert.equal(stN.drafts.filter((d: any) => d.caseId === n1Case.id).length, 0, 'ingen svarforslag');
+const n2 = stN.inbox.find((x: any) => x.id === 'n2');
+assert.equal(n2.decision, 'ignored'); assert.match(n2.reason, /^Du står på kopi/);
+// Svar i samme tråd der Espen fortsatt bare er på kopi, og andre svarer: legges i saken uten forslag
+inbox.push(msg('n3', 'conv-n1', 'joakim@rix.no', 'Joakim', 'SV: Rørarbeid bad', 'RIX starter mandag.', '2026-10-23T11:50:00Z', {
+  toRecipients: [{ emailAddress: { address: 'nina@kunde.no' } }], ccRecipients: [{ emailAddress: { address: 'espen@uvaagelektro.no' } }] }));
+clock = Date.parse('2026-10-23T11:51:00Z');
+await mail.syncOnce();
+stN = (await espen.req('GET', '/api/state')).json;
+assert.equal(stN.messages.filter((m: any) => m.threadId === n1Case.id).length, 2, 'svaret ligger i saken');
+assert.equal(stN.drafts.filter((d: any) => d.caseId === n1Case.id).length, 0, 'fortsatt ingen forslag');
+assert.equal((await pg.query<any>('SELECT count(*)::int AS n FROM drafts')).rows[0].n, draftsBefore, 'ingen nye utkast');
+ok('På kopi: kundesak der andre skal svare havner under Venter på kunde uten forslag; ren orientering sorteres bort');
+
 // 11. Synkroniseringsrunder registreres for helserapportering
 const lastRun = await mail.latestDeliveredRun();
 assert.ok(lastRun && lastRun.scan_run_id.startsWith('mail-sync-') && lastRun.persisted_at);
@@ -404,5 +448,5 @@ assert.equal(st.status, 'reconnect_required'); assert.equal(st.connected, false)
 assert.equal(await mail.syncOnce(), null);
 ok('Utløpt Microsoft-tilkobling oppdages og vises. Synk stopper uten å krasje.');
 
-console.log(`\n${pass} av 22 tester bestått`);
+console.log(`\n${pass} av 24 tester bestått`);
 process.exit(0);
