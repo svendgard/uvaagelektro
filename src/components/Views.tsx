@@ -75,6 +75,7 @@ function InboxMailDialog({ item, onClose, openCase }: { item: InboxItem | null; 
 export function InboxView({ openCase }: { openCase: (id: string) => void }) {
   const { state, tenant } = useStore();
   const [filter, setFilter] = useState<InboxFilter>('all');
+  const [q, setQ] = useState('');
   const [open, setOpen] = useState<InboxItem | null>(null);
   const caseByThread = useMemo(() => new Map(state.cases.map((c) => [c.threadId, c])), [state.cases]);
 
@@ -95,7 +96,13 @@ export function InboxView({ openCase }: { openCase: (id: string) => void }) {
     ignored: items.filter((i) => i.decision === 'ignored').length,
     internal: items.filter((i) => i.decision === 'internal' || i.decision === 'self').length,
   };
-  const shown = items.filter((i) => filter === 'all' || i.decision === filter || (filter === 'internal' && i.decision === 'self'));
+  // Antall e-poster per sak (én sak kan ha flere e-poster i samme tråd).
+  const perCase = useMemo(() => { const m = new Map<string, number>(); for (const i of items) if (i.caseId) m.set(i.caseId, (m.get(i.caseId) ?? 0) + 1); return m; }, [items]);
+  const ql = q.trim().toLowerCase();
+  // Søk går på tvers av alle grupper: avsender, e-postadresse, emne, saksnummer og grunn.
+  const shown = items.filter((i) => ql
+    ? `${i.from.name} ${i.from.email} ${i.subject} ${i.caseNumber ?? ''} ${i.reason}`.toLowerCase().includes(ql)
+    : filter === 'all' || i.decision === filter || (filter === 'internal' && i.decision === 'self'));
   const tabs: { id: InboxFilter; label: string }[] = [
     { id: 'all', label: 'Alle' }, { id: 'case', label: 'Saker' }, { id: 'ignored', label: 'Sortert bort' }, { id: 'internal', label: 'Interne' },
   ];
@@ -114,7 +121,13 @@ export function InboxView({ openCase }: { openCase: (id: string) => void }) {
         </span>}
       </div>
 
-      <div className="grid grid-cols-4 gap-1 rounded-xl border border-line bg-surface p-1" role="tablist" aria-label="Filter">
+      <div className="relative">
+        <Icon name="search" className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-faint" />
+        <label className="sr-only" htmlFor="inbox-search">Søk i e-post</label>
+        <input id="inbox-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Søk avsender, emne, sak" className="field" style={{ paddingLeft: 32 }} />
+      </div>
+
+      <div className={cx('grid grid-cols-4 gap-1 rounded-xl border border-line bg-surface p-1', ql && 'opacity-50')} role="tablist" aria-label="Filter">
         {tabs.map((t) => (
           <button key={t.id} role="tab" aria-selected={filter === t.id} onClick={() => setFilter(t.id)}
             className={cx('flex min-w-0 flex-col items-center justify-center rounded-lg px-1 py-1.5 text-[12px] font-semibold leading-tight sm:flex-row sm:gap-1.5 sm:text-[13px]', filter === t.id ? 'bg-brand text-surface' : 'text-muted hover:text-ink')}>
@@ -123,8 +136,11 @@ export function InboxView({ openCase }: { openCase: (id: string) => void }) {
         ))}
       </div>
 
+      {ql ? <p className="text-xs text-faint">{shown.length} treff i alle e-poster.</p>
+        : filter === 'case' && counts.case > 0 && <p className="text-xs text-faint">{counts.case} e-poster i {perCase.size} saker. Svar i samme tråd samles i én sak.</p>}
+
       <div className="card overflow-hidden">
-        {shown.length === 0 ? <p className="px-4 py-10 text-center text-[13px] text-faint">{items.length ? 'Ingen e-poster i denne gruppen.' : 'Ingen e-post ennå. Nye e-poster dukker opp her innen et minutt.'}</p> : (
+        {shown.length === 0 ? <p className="px-4 py-10 text-center text-[13px] text-faint">{ql ? 'Ingen e-poster matcher søket.' : items.length ? 'Ingen e-poster i denne gruppen.' : 'Ingen e-post ennå. Nye e-poster dukker opp her innen et minutt.'}</p> : (
           <ul className="divide-y divide-line">
             {shown.map((i) => {
               const meta = DECISION_META[i.decision];
@@ -138,7 +154,7 @@ export function InboxView({ openCase }: { openCase: (id: string) => void }) {
                       </div>
                       <p className="truncate text-[13px] text-ink">{i.subject || '(uten emne)'}</p>
                       <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                        <span className={cx('whitespace-nowrap rounded-full px-1.5 py-px text-[10px] font-bold leading-4', meta.tone)}>{i.decision === 'case' && i.caseNumber ? `Sak ${i.caseNumber}` : meta.label}</span>
+                        <span className={cx('whitespace-nowrap rounded-full px-1.5 py-px text-[10px] font-bold leading-4', meta.tone)}>{i.decision === 'case' && i.caseNumber ? `Sak ${i.caseNumber}${(perCase.get(i.caseId!) ?? 0) > 1 ? ` · ${perCase.get(i.caseId!)} e-poster` : ''}` : meta.label}</span>
                         {i.decision === 'ignored' && i.reason && <span className="truncate text-[11px] text-muted">{i.reason}</span>}
                         {i.hasAttachments && <Icon name="paperclip" className="h-3.5 w-3.5 text-faint" />}
                       </div>
