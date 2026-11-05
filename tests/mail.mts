@@ -435,6 +435,22 @@ assert.equal(stN.drafts.filter((d: any) => d.caseId === n1Case.id).length, 0, 'f
 assert.equal((await pg.query<any>('SELECT count(*)::int AS n FROM drafts')).rows[0].n, draftsBefore, 'ingen nye utkast');
 ok('På kopi: kundesak der andre skal svare havner under Venter på kunde uten forslag; ren orientering sorteres bort');
 
+// 10i. Automatiske svar i en sakstråd gir ikke svarforslag. Manuell flytting oppdaterer neste steg.
+const autoCase = stN.inbox.find((x: any) => x.id === 'c1').caseId;
+const autoDraftsBefore = (await pg.query<any>('SELECT count(*)::int AS n FROM drafts WHERE case_id = $1', [autoCase])).rows[0].n;
+inbox.push(msg('a1', 'conv-c1', 'MicrosoftExchange329e71ec@uvaagelektro.no', 'Microsoft Outlook', 'Ikke levert: Bad', 'Meldingen kunne ikke leveres.', '2026-10-23T12:00:00Z'));
+inbox.push(msg('a2', 'conv-c1', 'kunde3@test.no', 'Kunde Tre', 'Automatisk svar: Bad', 'Jeg er på ferie til mandag.', '2026-10-23T12:01:00Z'));
+clock = Date.parse('2026-10-23T12:02:00Z');
+await mail.syncOnce();
+const stA = (await espen.req('GET', '/api/state')).json;
+assert.equal(stA.messages.filter((m: any) => m.threadId === autoCase).length, 3, 'automatiske svar ligger i saken');
+assert.equal((await pg.query<any>('SELECT count(*)::int AS n FROM drafts WHERE case_id = $1', [autoCase])).rows[0].n, autoDraftsBefore, 'ingen nye svarforslag');
+assert.ok(stA.activities.some((a: any) => a.text.startsWith('Automatisk svar mottatt i saken')));
+assert.equal((await espen.req('POST', `/api/cases/${n1Case.id}`, { status: 'awaiting_approval' })).status, 200);
+const moved = (await espen.req('GET', '/api/state')).json.cases.find((c: any) => c.id === n1Case.id);
+assert.equal(moved.nextAction, 'Flyttet hit av Espen. Trenger oppfølging.');
+ok('Automatiske svar og leveringsfeil gir ikke svarforslag; manuell flytting oppdaterer neste steg');
+
 // 11. Synkroniseringsrunder registreres for helserapportering
 const lastRun = await mail.latestDeliveredRun();
 assert.ok(lastRun && lastRun.scan_run_id.startsWith('mail-sync-') && lastRun.persisted_at);
@@ -448,5 +464,5 @@ assert.equal(st.status, 'reconnect_required'); assert.equal(st.connected, false)
 assert.equal(await mail.syncOnce(), null);
 ok('Utløpt Microsoft-tilkobling oppdages og vises. Synk stopper uten å krasje.');
 
-console.log(`\n${pass} av 24 tester bestått`);
+console.log(`\n${pass} av 25 tester bestått`);
 process.exit(0);

@@ -202,6 +202,12 @@ export function createMail(d: MailDeps) {
     return draftId;
   }
 
+  /** Automatiske avsendere og svar: fravær, leveringsfeil, systemvarsler. */
+  const isAutomatic = (email: string, name: string, subject: string) =>
+    /(^|[._-])(no-?reply|noreply|donotreply|do-not-reply|mailer-daemon|postmaster|bounce|notifications?)([._-]|@)/i.test(email)
+    || /^microsoft outlook$|^mail delivery (subsystem|system)$|^postmaster$/i.test(name.trim())
+    || /^\s*(automatisk svar|autosvar|automatic reply|auto(matic)?[- ]?reply|out of office|fravær|ikke levert|kan ikke leveres|undeliverable|delivery (status notification|has failed)|levering mislyktes)\b/i.test(subject);
+
   /** Bilder limt inn i teksten (typisk fra iPhone) gir ikke hasAttachments=true hos Microsoft. */
   const hasInlineImages = (body: string) => /\[(cid:[^\]]+|[^\]\n]{1,80}\.(jpe?g|png|gif|heic|heif|webp))\]/i.test(body);
 
@@ -334,8 +340,12 @@ export function createMail(d: MailDeps) {
           await logItem(m, 'case', '', existing.id);
           await db.query(`UPDATE cases SET unread = true, updated_at = $2 WHERE id = $1`, [existing.id, new Date(now())]);
           // Står eieren bare på kopi, vurderer AI om han må svare. Ellers legges e-posten bare til i saken.
-          const needsOwner = !ownerOnCc || (await triage(d.ai, tenant, await asMail(atts), { force: true })).owner_action === 'reply';
-          await activity('customer', `${from.name || from.email} skrev i saken${ownerOnCc ? ` (du står på kopi${needsOwner ? '' : ', ingen svar trengs fra deg'})` : ''}.`, existing.id);
+          // Automatiske svar (fravær, leveringsfeil, noreply) legges i saken, men gir aldri svarforslag.
+          const automatic = isAutomatic(from.email, from.name, m.subject ?? '');
+          const needsOwner = !automatic && (!ownerOnCc || (await triage(d.ai, tenant, await asMail(atts), { force: true })).owner_action === 'reply');
+          await activity(automatic ? 'system' : 'customer', automatic
+            ? `Automatisk svar mottatt i saken (${from.name || from.email}): «${(m.subject ?? '').slice(0, 80)}».`
+            : `${from.name || from.email} skrev i saken${ownerOnCc ? ` (du står på kopi${needsOwner ? '' : ', ingen svar trengs fra deg'})` : ''}.`, existing.id, automatic ? 'warning' : undefined);
           if (needsOwner && !['won', 'lost'].includes(existing.status)) await createDraft(existing.id, { fromCustomer: true });
         } else if (from.email === mailbox) {
           await logItem(m, 'self', 'Sendt fra deg selv');
@@ -875,7 +885,15 @@ export function createMail(d: MailDeps) {
       if (!kase) return h.err(c, 404, 'Fant ikke saken.');
       const b = await h.body(c);
       const statuses = ['new', 'ai_processing', 'awaiting_approval', 'awaiting_customer', 'ready_for_quote', 'quote_sent', 'follow_up', 'in_progress', 'won', 'lost'];
-      if (typeof b.status === 'string' && statuses.includes(b.status)) { await db.query('UPDATE cases SET status = $2 WHERE id = $1', [kase.id, b.status]); await activity('owner', `${tenant.owner.firstName} flyttet saken manuelt.`, kase.id); }
+      if (typeof b.status === 'string' && statuses.includes(b.status)) {
+        // Neste steg følger kategorien saken flyttes til, så teksten aldri står igjen fra forrige kategori.
+        const next: Record<string, string> = {
+          awaiting_approval: `Flyttet hit av ${tenant.owner.firstName}. Trenger oppfølging.`, new: 'Ny henvendelse.', ready_for_quote: 'Klar for tilbud.', follow_up: 'Trenger oppfølging.',
+          in_progress: 'Under arbeid.', awaiting_customer: 'Venter på svar fra kunden.', quote_sent: 'Tilbud sendt. Venter på kunden.', won: 'Avsluttet.', lost: 'Avsluttet.',
+        };
+        await db.query('UPDATE cases SET status = $2, next_action = COALESCE($3, next_action) WHERE id = $1', [kase.id, b.status, next[b.status] ?? null]);
+        await activity('owner', `${tenant.owner.firstName} flyttet saken manuelt.`, kase.id);
+      }
       if (typeof b.priority === 'string' && ['low', 'normal', 'high', 'urgent'].includes(b.priority)) await db.query('UPDATE cases SET priority = $2 WHERE id = $1', [kase.id, b.priority]);
       if (b.unread === false) await db.query('UPDATE cases SET unread = false WHERE id = $1', [kase.id]);
       if (b.flagged === null) { await db.query('UPDATE cases SET flagged = NULL WHERE id = $1', [kase.id]); await activity('owner', `${tenant.owner.firstName} markerte flagget som håndtert.`, kase.id, 'success'); }

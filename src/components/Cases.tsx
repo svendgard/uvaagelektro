@@ -39,6 +39,7 @@ export function CaseRow({ c, draft, onOpen }: { c: Case; draft?: Draft; onOpen: 
     : cat === 'quote' ? 'Tilbud sendt'
     : cat === 'working' ? 'Under arbeid'
     : cat === 'closed' ? (c.status === 'won' ? 'Vunnet' : 'Avsluttet')
+    : /venter på (svar fra )?kunde/i.test(c.nextAction ?? '') ? 'Trenger oppfølging'
     : c.nextAction;
   return (
     <li>
