@@ -162,6 +162,8 @@ export async function draftReply(cfg: AiConfig, t: TenantConfig, input: {
   feedback?: string;
   /** Forrige utkast når eieren ber om «Skriv på nytt». */
   previous?: { subject: string; body: string };
+  /** Eierens ekte signatur (med hilsen og logo) legges til ved sending; utkastet skal da slutte uten hilsen. */
+  autoSignature?: boolean;
 }): Promise<DraftOut & { engine: 'ai' | 'regler' }> {
   const fn = input.customerName.split(' ')[0] || '';
   const last = [...input.thread].reverse().find((m) => m.direction === 'inbound');
@@ -170,7 +172,7 @@ export async function draftReply(cfg: AiConfig, t: TenantConfig, input: {
     const q = input.missing.length ? `\n\nFor å kunne hjelpe deg videre trenger vi:\n${input.missing.map((x) => `• ${x}`).join('\n')}` : '';
     return {
       engine: 'regler', subject,
-      body: `Hei ${fn},\n\nTakk for at du tok kontakt med ${t.company.shortName}.${input.urgent ? ' Vi ringer deg så snart vi kan.' : ''}${q}\n\n${t.signature}`,
+      body: `Hei ${fn},\n\nTakk for at du tok kontakt med ${t.company.shortName}.${input.urgent ? ' Vi ringer deg så snart vi kan.' : ''}${q}${input.autoSignature ? '' : `\n\n${t.signature}`}`,
       rationale: 'Laget med enkle regler (AI ikke konfigurert).', missing: input.missing, requires_human_judgement: input.urgent ? ['Saken haster. Vurder å ringe kunden.'] : [], language: 'no',
     };
   }
@@ -186,7 +188,9 @@ export async function draftReply(cfg: AiConfig, t: TenantConfig, input: {
       properties: {
         language: { type: 'string', enum: Object.keys(LANGS), description: 'Språket utkastet er skrevet på. Svar på samme språk som kunden skrev, ellers norsk.' },
         subject: { type: 'string' },
-        body: { type: 'string', description: `Hele e-posten, med hilsen og signaturen nøyaktig slik: \n${t.signature}` },
+        body: { type: 'string', description: input.autoSignature
+          ? 'Hele e-posten fra «Hei …» til siste setning. IKKE skriv hilsen («Med vennlig hilsen», «Mvh») eller signatur – eierens signatur legges til automatisk.'
+          : `Hele e-posten, med hilsen og signaturen nøyaktig slik: \n${t.signature}` },
         rationale: { type: 'string', description: 'Hvorfor dette svaret, i én–to setninger til eieren.' },
         missing: { type: 'array', items: { type: 'string' } },
         requires_human_judgement: { type: 'array', items: { type: 'string' }, description: 'Ting eieren må vurdere før sending: priser, teknikk, sikkerhet, kapasitet, tidspunkter.' },

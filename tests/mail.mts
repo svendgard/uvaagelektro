@@ -33,6 +33,10 @@ const fakeFetch: typeof fetch = async (input: any, init: any = {}) => {
   const url = String(input);
   const method = init.method ?? 'GET';
   calls.push({ url, method, body: typeof init.body === 'string' ? init.body : undefined });
+  if (url.includes('/mailFolders/sentitems/messages?$top=25')) return json({ value: [{ id: 'sig-1', body: { contentType: 'html', content: '<html><body><p>Hei</p><p class=MsoNormal><a name="_MailAutoSig">Med vennlig hilsen/Regards</a></p><p><b>Espen Uvaag Halvorsen</b></p><p><img src="cid:logo1"></p><div id="divRplyFwdMsg">Fra: x</div></body></html>' } }] });
+  if (url.endsWith('/me/messages/sig-1/attachments')) return json({ value: [{ name: 'logo.png', contentType: 'image/png', size: 5000, isInline: true, contentId: 'logo1', contentBytes: 'QUJD' }] });
+  if (method === 'POST' && url.endsWith('/me/messages')) return json({ id: 'new-1' });
+  if (method === 'POST' && /\/me\/messages\/[^/]+\/attachments$/.test(url)) return json({ id: 'att-x' });
   if (url.includes('/oauth2/v2.0/token')) {
     const p = new URLSearchParams(init.body);
     if (p.get('grant_type') === 'refresh_token' && refreshFails) return json({ error: 'invalid_grant', error_description: 'AADSTS70000: revoked' }, 400);
@@ -182,7 +186,8 @@ ok('Godkjenn: kreves før sending, bare eieren, dobbel godkjenning gir 200/409, 
 
 // 8. Send-kø: redigering til sending, skyggemodus stopper, redigert tekst og mottaker brukes, aldri dobbelt, ingen endring etter sending
 assert.equal((await espen.req('PUT', `/api/drafts/${draftId}/text`, { email: 'ikke-en-epost' })).status, 400);
-assert.equal((await espen.req('PUT', `/api/drafts/${draftId}/text`, { body: edited + '\nPS: Ring gjerne.', email: 'kunde2@test.no' })).status, 200);
+assert.equal((await espen.req('PUT', `/api/drafts/${draftId}/text`, { cc: ['ikke en epost'] })).status, 400);
+assert.equal((await espen.req('PUT', `/api/drafts/${draftId}/text`, { body: edited + '\nPS: Ring gjerne.', email: 'kunde2@test.no', cc: ['Bygg@Test.no'] })).status, 200);
 assert.equal((await espen.req('POST', '/api/mail/settings', { sending_enabled: false })).status, 403);
 assert.equal((await sa.req('POST', '/api/mail/settings', { sending_enabled: false })).status, 200);
 assert.equal((await espen.req('POST', `/api/drafts/${draftId}/send`)).status, 409, 'skyggemodus');
@@ -194,7 +199,11 @@ const replies = calls.filter((c) => c.url.includes('/messages/m1/createReply'));
 assert.equal(replies.length, 1);
 const patchBody = JSON.parse(calls.find((c) => c.method === 'PATCH' && c.body!.includes('Redigert av Espen'))!.body!).body;
 assert.equal(patchBody.contentType, 'HTML');
-assert.match(patchBody.content, /<body><div style="font-family:[^"]+"><p[^>]*>Hei Test,<\/p><p[^>]*>Redigert av Espen\.<\/p><p[^>]*>Hilsen Espen<br>PS: Ring gjerne\.<\/p><\/div><br><div id="divRplyFwdMsg">/, 'avsnitt, linjeskift, og sitert tråd under');
+assert.match(patchBody.content, /<body><div style="font-family:[^"]+"><p[^>]*>Hei Test,<\/p><p[^>]*>Redigert av Espen\.<\/p><p[^>]*>Hilsen Espen<br>PS: Ring gjerne\.<\/p><\/div><div style="font-family:[^"]+"><p class=MsoNormal><a name="_MailAutoSig">Med vennlig hilsen\/Regards<\/a><\/p><p><b>Espen Uvaag Halvorsen<\/b><\/p><p><img src="cid:logo1"><\/p><\/div><br><div id="divRplyFwdMsg">/, 'tekst, PS beholdt, Outlook-signatur, sitert tråd under');
+const logoPost = calls.find((c) => c.method === 'POST' && /\/attachments$/.test(c.url) && c.body!.includes('"contentId":"logo1"'))!;
+assert.ok(logoPost && JSON.parse(logoPost.body!).isInline === true, 'logo sendt som innebygd bilde');
+const ccPatch = JSON.parse(calls.find((c) => c.method === 'PATCH' && c.body!.includes('Redigert av Espen'))!.body!);
+assert.deepEqual(ccPatch.ccRecipients, [{ emailAddress: { address: 'bygg@test.no' } }], 'kopi satt');
 assert.ok(calls.some((c) => c.method === 'PATCH' && c.body!.includes('kunde2@test.no')), 'ny mottaker settes');
 assert.equal((await espen.req('PUT', `/api/drafts/${draftId}/text`, { body: 'for sent' })).status, 409);
 assert.equal((await espen.req('POST', `/api/drafts/${draftId}/reject`, {})).status, 409);
@@ -362,6 +371,26 @@ fNow = (await espen.req('GET', '/api/state')).json;
 assert.equal(fNow.cases.find((c: any) => c.id === fCase.id).status, 'awaiting_approval', 'nytt svar fra kunden: Venter på eieren');
 ok('«Under arbeid»: settes av eieren, blir stående ved sending og nye forslag, flyttes når kunden svarer');
 
+// 10g. Kopi som standard: alle som var med på e-posten (unntatt oss og kunden) er med videre. Signatur kan sees og slås av.
+inbox.push(msg('c1', 'conv-c1', 'kunde3@test.no', 'Kunde Tre', 'Bad', 'Hei, se vedlagt.', '2026-10-23T11:30:00Z', {
+  toRecipients: [{ emailAddress: { address: 'espen@uvaagelektro.no' } }, { emailAddress: { address: 'David@Ror.no' } }],
+  ccRecipients: [{ emailAddress: { address: 'nina@ror.no' } }, { emailAddress: { address: 'kunde3@test.no' } }],
+}));
+clock = Date.parse('2026-10-23T11:31:00Z');
+await mail.syncOnce();
+const stC = (await espen.req('GET', '/api/state')).json;
+const cCase = stC.inbox.find((x: any) => x.id === 'c1').caseId;
+const cDraft = stC.drafts.find((d: any) => d.caseId === cCase && d.state === 'pending');
+assert.deepEqual(cDraft.cc, ['david@ror.no', 'nina@ror.no']);
+assert.equal(stC.messages.find((m: any) => m.threadId === cCase).cc.length, 2, 'kopi vises på mottatt e-post');
+const sigView = await espen.req('GET', '/api/mail/signature');
+assert.equal(sigView.json.status, 'active'); assert.match(sigView.json.preview, /data:image\/png;base64,QUJD/);
+assert.equal((await espen.req('GET', '/api/mail/status')).json.signature_active, true);
+assert.equal((await espen.req('POST', '/api/mail/signature', { active: false })).json.status, 'inactive');
+assert.equal((await espen.req('GET', '/api/mail/status')).json.signature_active, false);
+assert.equal((await espen.req('POST', '/api/mail/signature', { active: true })).json.status, 'active');
+ok('Kopi som standard fra mottatt e-post; signaturen fra Outlook kan forhåndsvises og slås av/på');
+
 // 11. Synkroniseringsrunder registreres for helserapportering
 const lastRun = await mail.latestDeliveredRun();
 assert.ok(lastRun && lastRun.scan_run_id.startsWith('mail-sync-') && lastRun.persisted_at);
@@ -375,5 +404,5 @@ assert.equal(st.status, 'reconnect_required'); assert.equal(st.connected, false)
 assert.equal(await mail.syncOnce(), null);
 ok('Utløpt Microsoft-tilkobling oppdages og vises. Synk stopper uten å krasje.');
 
-console.log(`\n${pass} av 21 tester bestått`);
+console.log(`\n${pass} av 22 tester bestått`);
 process.exit(0);

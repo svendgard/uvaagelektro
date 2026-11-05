@@ -7,6 +7,7 @@ import { decryptSecret, encryptSecret } from './auth/totp';
 import { newToken, sha256 } from './auth/crypto';
 import { Graph, GraphError, MsAuthError, addr, authorizeUrl, exchangeCode, idTokenClaims, pkce, refreshTokens, type Fetch, type GraphMessage, type MsConfig } from './microsoft';
 import { cleanMail } from '../src/lib/cleanMail';
+import { cidsIn, extractSignature, previewHtml, stripClosing, type StoredSignature } from './signature';
 import { draftReply, translate, triage, LANGS, type AiConfig, type InMail, type Lang } from './ai';
 
 /**
@@ -47,6 +48,7 @@ export function createMail(d: MailDeps) {
   const f = d.fetch ?? fetch;
   let syncing = false;
   let backfilled = false;
+  let signatureTried = false;
   let excludeFolders: string[] | undefined;
 
   const activity = (actor: string, text: string, caseId?: string | null, tone?: string) =>
@@ -76,6 +78,38 @@ export function createMail(d: MailDeps) {
   const graph = () => new Graph(accessToken, f);
   const sendOnConnect = tenant.mail.sendingOnConnect !== false;
 
+  const getSetting = async <T,>(key: string): Promise<T | undefined> =>
+    (await db.query<{ value: T }>('SELECT value FROM tenant_settings WHERE tenant_id = $1 AND key = $2', [tenantId, key])).rows[0]?.value;
+  const setSetting = (key: string, value: unknown) =>
+    db.query(`INSERT INTO tenant_settings(tenant_id, key, value, updated_at) VALUES ($1,$2,$3,$4)
+      ON CONFLICT (tenant_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`, [tenantId, key, JSON.stringify(value), new Date(now())]);
+
+  type SigSetting = (StoredSignature & { active: boolean }) | { notFound: true; fetchedAt: string; active: false };
+  /** Signaturen som brukes i utgående e-post, eller null. */
+  const activeSignature = async (): Promise<StoredSignature | null> => {
+    const s = await getSetting<SigSetting>('signature');
+    return s && s.active && 'html' in s ? s : null;
+  };
+
+  /** Henter signaturen (med logo) fra eierens siste sendte e-poster i Outlook. */
+  async function fetchSignature(): Promise<SigSetting> {
+    const g = graph();
+    for (const m of await g.recentSentHtml(25)) {
+      const html = m.body?.content ?? '';
+      const sig = extractSignature(html);
+      if (!sig) continue;
+      const cids = cidsIn(sig);
+      const images = cids.length ? (await g.inlineImages(m.id)).filter((i) => cids.includes(i.contentId) && i.size <= 400_000) : [];
+      const value: SigSetting = { html: sig, images: images.map(({ size: _s, ...i }) => i), fetchedAt: new Date(now()).toISOString(), sourceMessageId: m.id, active: true };
+      await setSetting('signature', value);
+      log('info', 'Signatur hentet fra Outlook', { images: images.length });
+      return value;
+    }
+    const none: SigSetting = { notFound: true, fetchedAt: new Date(now()).toISOString(), active: false };
+    await setSetting('signature', none);
+    return none;
+  }
+
   async function nextNumber(): Promise<string> {
     const year = new Date(now()).getFullYear();
     const n = Number((await db.query<{ n: string }>('SELECT count(*)::text AS n FROM cases WHERE tenant_id = $1', [tenantId])).rows[0].n) + 1;
@@ -88,24 +122,38 @@ export function createMail(d: MailDeps) {
       .map((m) => ({ direction: m.direction, from: `${m.from_addr.name} <${m.from_addr.email}>`, at: new Date(m.sent_at).toISOString(), subject: m.subject, body: cleanMail(m.body).text || m.body }));
   }
 
+  /**
+   * Kopi som standard: alle som var med på e-posten det svares på (mottakere og kopi), unntatt oss selv og
+   * kunden vi svarer til. Eieren kan fjerne eller legge til før sending.
+   */
+  function defaultCc(m: { from_addr: any; to_addrs: any[]; cc_addrs: any[] } | undefined, recipient: string): string[] {
+    if (!m) return [];
+    const own = (tenant.mail.mailbox || '').toLowerCase();
+    const skip = new Set([own, (recipient || '').toLowerCase(), String(m.from_addr?.email ?? '').toLowerCase()]);
+    const all = [...(m.to_addrs ?? []), ...(m.cc_addrs ?? [])].map((a: any) => String(a?.email ?? '').toLowerCase()).filter((e) => e && !skip.has(e));
+    return [...new Set(all)].slice(0, 10);
+  }
+
   /** AIOliver lager et utkast og legger saken til godkjenning. */
   async function createDraft(caseId: string, opts: { kind?: 'reply' | 'info_request' | 'follow_up' | 'quote'; feedback?: string; previous?: { subject: string; body: string }; fromCustomer?: boolean } = {}) {
     const c = (await db.query<any>('SELECT * FROM cases WHERE id = $1 AND tenant_id = $2', [caseId, tenantId])).rows[0];
     if (!c) throw new Error('Fant ikke saken');
     const missing: string[] = c.missing_info ?? [];
     const kind = opts.kind ?? (missing.length ? 'info_request' : 'reply');
-    const out = await draftReply(d.ai, tenant, { kind, customerName: c.customer.name, summary: c.summary, missing, urgent: c.priority === 'urgent', thread: await threadFor(caseId), feedback: opts.feedback, previous: opts.previous });
+    const autoSignature = !!(await activeSignature());
+    const out = await draftReply(d.ai, tenant, { kind, customerName: c.customer.name, summary: c.summary, missing, urgent: c.priority === 'urgent', thread: await threadFor(caseId), feedback: opts.feedback, previous: opts.previous, autoSignature });
     const prev = (await db.query<{ v: number }>('SELECT COALESCE(max(version),0)::int AS v FROM drafts WHERE case_id = $1', [caseId])).rows[0].v;
     await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND state IN ('pending','approved','send_failed')`, [caseId]);
-    const lastIn = (await db.query<{ graph_id: string }>(`SELECT graph_id FROM mail_messages WHERE case_id = $1 AND direction = 'inbound' AND graph_id IS NOT NULL ORDER BY sent_at DESC LIMIT 1`, [caseId])).rows[0];
+    const lastIn = (await db.query<{ graph_id: string; from_addr: any; to_addrs: any[]; cc_addrs: any[] }>(`SELECT graph_id, from_addr, to_addrs, cc_addrs FROM mail_messages WHERE case_id = $1 AND direction = 'inbound' AND graph_id IS NOT NULL ORDER BY sent_at DESC LIMIT 1`, [caseId])).rows[0];
+    const cc = defaultCc(lastIn, c.customer.email);
     const author = kind === 'follow_up' ? 'followup' : 'quote';
     const judgement = [...out.requires_human_judgement];
     if (c.flagged?.reason) judgement.unshift(`Saken er flagget: ${c.flagged.reason}`);
     if (out.engine === 'regler') judgement.push('AI er ikke koblet til ennå. Utkastet er laget med enkle regler.');
     const draftId = randomUUID();
-    await db.query(`INSERT INTO drafts(id, tenant_id, case_id, kind, author, subject, body, rationale, missing, judgement, version, state, reply_to_graph_id, created_at, language, feedback)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13,$14,$15)`,
-      [draftId, tenantId, caseId, kind, author, out.subject, out.body, out.rationale, JSON.stringify(out.missing), JSON.stringify(judgement), prev + 1, lastIn?.graph_id ?? null, new Date(now()), out.language, opts.feedback ?? null]);
+    await db.query(`INSERT INTO drafts(id, tenant_id, case_id, kind, author, subject, body, rationale, missing, judgement, version, state, reply_to_graph_id, created_at, language, feedback, cc)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13,$14,$15,$16)`,
+      [draftId, tenantId, caseId, kind, author, out.subject, out.body, out.rationale, JSON.stringify(out.missing), JSON.stringify(judgement), prev + 1, lastIn?.graph_id ?? null, new Date(now()), out.language, opts.feedback ?? null, JSON.stringify(cc)]);
     // Ny e-post fra kunden flytter saken til «Venter på eieren». Ber eieren selv om et forslag, blir saken der den er.
     const ownerCat = ['new', 'ai_processing', 'awaiting_approval', 'ready_for_quote', 'follow_up'].includes(c.status);
     await db.query(`UPDATE cases SET status = CASE WHEN $5 THEN 'awaiting_approval' ELSE status END, assigned_agent = $2, next_action = $3, updated_at = $4 WHERE id = $1`,
@@ -195,6 +243,11 @@ export function createMail(d: MailDeps) {
           if (atts.length) await db.query('UPDATE mail_messages SET attachments = $2 WHERE id = $1', [r.id, JSON.stringify(atts)]);
         }
         if (old.length) log('info', 'Hentet innlimte bilder for eldre e-poster', { messages: old.length });
+      }
+      // Engangs: hent signaturen fra Outlook hvis den ikke er hentet før.
+      if (!signatureTried) {
+        signatureTried = true;
+        if (!(await getSetting('signature'))) await fetchSignature().catch((e) => log('warn', 'Kunne ikke hente signatur', { error: String(e) }));
       }
       // ── Innboks ──
       const inboxSince = conn.inbox_watermark ? new Date(conn.inbox_watermark) : new Date(new Date(conn.connected_at).getTime() - (d.initialSyncDays ?? 3) * 864e5);
@@ -289,16 +342,29 @@ export function createMail(d: MailDeps) {
   const caseLabel = async (caseId: string) => (await db.query<any>('SELECT * FROM cases WHERE id = $1', [caseId])).rows[0];
 
   /** «Godkjenn»: lagrer versjonen som står i feltene. Agentens original tas vare på. Bare ett av to samtidige klikk vinner. */
-  async function approveDraft(draftId: string, who: Who, edited: { subject?: unknown; body?: unknown; language?: unknown } = {}): Promise<Result> {
+  /** Gyldige kopi-adresser, eller en feilmelding. undefined = ikke endret. */
+  function parseCc(v: unknown): { cc?: string[]; error?: string } {
+    if (v === undefined || v === null) return {};
+    if (!Array.isArray(v)) return { error: 'Ugyldig kopi-liste.' };
+    const cc = [...new Set(v.map((x) => String(x ?? '').trim().toLowerCase()).filter(Boolean))];
+    const bad = cc.find((e) => !EMAIL.test(e));
+    if (bad) return { error: `Ugyldig e-postadresse på kopi: ${bad}` };
+    if (cc.length > 10) return { error: 'Maks 10 på kopi.' };
+    return { cc };
+  }
+
+  async function approveDraft(draftId: string, who: Who, edited: { subject?: unknown; body?: unknown; language?: unknown; cc?: unknown } = {}): Promise<Result> {
+    const ccIn = parseCc(edited.cc);
+    if (ccIn.error) return { ok: false, status: 400, error: ccIn.error };
     const subject = clean(edited.subject, 300)?.trim();
     const body = clean(edited.body, 20000);
     const language = typeof edited.language === 'string' && edited.language in LANGS ? edited.language : null;
     const r = (await db.query<any>(`UPDATE drafts SET state = 'approved', decided_by = $3, decided_at = $4,
         original_subject = subject, original_body = body,
-        subject = COALESCE($5, subject), body = COALESCE($6, body), language = COALESCE($7, language),
+        subject = COALESCE($5, subject), body = COALESCE($6, body), language = COALESCE($7, language), cc = COALESCE($8::jsonb, cc),
         edited_by = CASE WHEN COALESCE($5, subject) <> subject OR COALESCE($6, body) <> body THEN $3 ELSE NULL END,
         error = NULL
-      WHERE id = $1 AND tenant_id = $2 AND state = 'pending' RETURNING *`, [draftId, tenantId, who.email, new Date(now()), subject ?? null, body ?? null, language])).rows[0];
+      WHERE id = $1 AND tenant_id = $2 AND state = 'pending' RETURNING *`, [draftId, tenantId, who.email, new Date(now()), subject ?? null, body ?? null, language, ccIn.cc ? JSON.stringify(ccIn.cc) : null])).rows[0];
     if (!r) return { ok: false, status: 409, error: 'Utkastet er allerede godkjent, avvist eller erstattet.' };
     await db.query(`UPDATE cases SET next_action = 'Godkjent. Trykk «Send» for å sende til kunden.', updated_at = $2 WHERE id = $1`, [r.case_id, new Date(now())]);
     await activity('owner', `${tenant.owner.firstName} godkjente utkast v${r.version}${r.edited_by ? ' (redigert)' : ''}. Klart for sending.`, r.case_id, 'success');
@@ -306,14 +372,16 @@ export function createMail(d: MailDeps) {
   }
 
   /** Redigerer et godkjent, ikke-sendt utkast (tekst og mottaker). */
-  async function updateApproved(draftId: string, who: Who, b: { subject?: unknown; body?: unknown; email?: unknown; language?: unknown }): Promise<Result> {
+  async function updateApproved(draftId: string, who: Who, b: { subject?: unknown; body?: unknown; email?: unknown; language?: unknown; cc?: unknown }): Promise<Result> {
+    const ccIn = parseCc(b.cc);
+    if (ccIn.error) return { ok: false, status: 400, error: ccIn.error };
     const email = clean(b.email, 200)?.trim().toLowerCase();
     if (email && !EMAIL.test(email)) return { ok: false, status: 400, error: 'Ugyldig e-postadresse.' };
     const language = typeof b.language === 'string' && b.language in LANGS ? b.language : null;
-    const r = (await db.query<any>(`UPDATE drafts SET subject = COALESCE($3, subject), body = COALESCE($4, body), recipient = COALESCE($5, recipient), language = COALESCE($7, language),
+    const r = (await db.query<any>(`UPDATE drafts SET subject = COALESCE($3, subject), body = COALESCE($4, body), recipient = COALESCE($5, recipient), language = COALESCE($7, language), cc = COALESCE($8::jsonb, cc),
         edited_by = CASE WHEN COALESCE($3, subject) <> subject OR COALESCE($4, body) <> body OR ($5 IS NOT NULL AND $5 IS DISTINCT FROM recipient) THEN $6 ELSE edited_by END
       WHERE id = $1 AND tenant_id = $2 AND state = 'approved' AND sending_at IS NULL RETURNING *`,
-      [draftId, tenantId, clean(b.subject, 300)?.trim() ?? null, clean(b.body, 20000) ?? null, email ?? null, who.email, language])).rows[0];
+      [draftId, tenantId, clean(b.subject, 300)?.trim() ?? null, clean(b.body, 20000) ?? null, email ?? null, who.email, language, ccIn.cc ? JSON.stringify(ccIn.cc) : null])).rows[0];
     if (!r) return { ok: false, status: 409, error: 'Utkastet er allerede sendt eller finnes ikke i Send-køen.' };
     await activity('owner', `${tenant.owner.firstName} redigerte godkjent utkast v${r.version} før sending.`, r.case_id);
     return { ok: true };
@@ -337,9 +405,14 @@ export function createMail(d: MailDeps) {
       return { ok: false, status: 400, error: 'Mangler gyldig e-postadresse til mottakeren.' };
     }
     let messageId: string | null = null;
+    const cc: string[] = (claimed.cc ?? []).filter((e: string) => e !== to);
+    const sig = await activeSignature();
+    // Med ekte signatur fjernes hilsen/tekstsignatur fra utkastet, så det ikke blir dobbelt.
+    const text = sig ? stripClosing(claimed.body, [tenant.signature, tenant.owner.name, tenant.owner.firstName, tenant.company.name, tenant.company.shortName]) : claimed.body;
+    const opts = { subject: claimed.subject, to, cc, signatureHtml: sig?.html, images: sig?.images };
     try {
-      if (claimed.reply_to_graph_id) messageId = (await graph().reply(claimed.reply_to_graph_id, claimed.body, claimed.subject, to)).draftId;
-      else await graph().sendNew(to, claimed.subject, claimed.body);
+      if (claimed.reply_to_graph_id) messageId = (await graph().reply(claimed.reply_to_graph_id, text, opts)).draftId;
+      else await graph().sendNew(to, claimed.subject, text, opts);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // Reservasjonen fjernes, så utkastet kan sendes på nytt. Ingenting ble sendt.
@@ -349,15 +422,15 @@ export function createMail(d: MailDeps) {
     }
     const at = new Date(now());
     await db.query(`UPDATE drafts SET state = 'sent', sent_at = $2, sent_by = $3, sent_to = $4, message_id = $5, error = NULL WHERE id = $1`, [draftId, at, who.email, to, messageId]);
-    await db.query(`INSERT INTO mail_messages(id, tenant_id, case_id, graph_id, conversation_id, direction, from_addr, to_addrs, subject, body, sent_at, delivery_state, drafted_by, approved_by)
-      VALUES ($1,$2,$3,NULL,$4,'outbound',$5,$6,$7,$8,$9,'confirmed',$10,$11)`,
+    await db.query(`INSERT INTO mail_messages(id, tenant_id, case_id, graph_id, conversation_id, direction, from_addr, to_addrs, cc_addrs, subject, body, sent_at, delivery_state, drafted_by, approved_by)
+      VALUES ($1,$2,$3,NULL,$4,'outbound',$5,$6,$7,$8,$9,$10,'confirmed',$11,$12)`,
       [randomUUID(), tenantId, c.id, c.conversation_id, JSON.stringify({ name: tenant.owner.name, email: conn.mailbox }), JSON.stringify([{ name: c.customer.name, email: to }]),
-        claimed.subject, claimed.body, at, claimed.author, claimed.decided_by ?? who.email]);
+        JSON.stringify(cc.map((email) => ({ name: email, email }))), claimed.subject, text, at, claimed.author, claimed.decided_by ?? who.email]);
     // «Under arbeid» settes og fjernes bare av eieren; sending av vanlige svar flytter ikke saken ut derfra.
     const nextStatus = claimed.kind === 'quote' ? 'quote_sent' : c.status === 'in_progress' ? 'in_progress' : 'awaiting_customer';
     await db.query(`UPDATE cases SET status = $2, assigned_agent = 'followup', next_action = $4, updated_at = $3 WHERE id = $1`,
       [c.id, nextStatus, at, nextStatus === 'in_progress' ? 'Under arbeid.' : 'Venter på svar fra kunden.']);
-    await activity('owner', `${tenant.owner.firstName} sendte e-post til ${to} (bekreftet av Microsoft).`, c.id, 'success');
+    await activity('owner', `${tenant.owner.firstName} sendte e-post til ${to}${cc.length ? ` (kopi: ${cc.join(', ')})` : ''} (bekreftet av Microsoft).`, c.id, 'success');
     return { ok: true };
   }
 
@@ -415,7 +488,7 @@ export function createMail(d: MailDeps) {
         original: x.original_subject != null ? { subject: x.original_subject, body: x.original_body } : undefined,
         editedBy: x.edited_by ?? undefined, decidedBy: x.decided_by ?? undefined, decidedAt: x.decided_at ? iso(x.decided_at) : undefined,
         sentAt: x.sent_at ? iso(x.sent_at) : undefined, sentBy: x.sent_by ?? undefined, sentTo: x.sent_to ?? undefined,
-        error: x.error ?? undefined, rewritten: !!x.rewritten, feedback: x.feedback ?? undefined,
+        error: x.error ?? undefined, rewritten: !!x.rewritten, feedback: x.feedback ?? undefined, cc: x.cc ?? [],
       })),
       activities: acts.slice(0, 120).map((a) => ({ id: String(a.id), at: iso(a.at), actor: a.actor, caseId: a.case_id ?? undefined, text: a.text, tone: a.tone ?? undefined })),
       inbox: inbox.map((i) => ({
@@ -440,6 +513,7 @@ export function createMail(d: MailDeps) {
       last_sync_at: c?.last_sync_at ? new Date(c.last_sync_at).toISOString() : null,
       connected_at: c?.connected_at ? new Date(c.connected_at).toISOString() : null,
       sending_enabled: !!c?.sending_enabled,
+      signature_active: !!(await activeSignature()),
       last_run: last ? { started_at: new Date(last.started_at).toISOString(), ok: !last.error, error: last.error, fetched: last.fetched, new_cases: last.new_cases } : null,
     };
   }
@@ -615,6 +689,31 @@ export function createMail(d: MailDeps) {
       await h.audit(user(c), 'mail.sending_changed', enabled ? 'Sending slått PÅ' : 'Sending slått av (skyggemodus)');
       await activity('system', enabled ? 'Sending fra Agentkontoret er slått på. Alt krever fortsatt godkjenning.' : 'Skyggemodus: sending er slått av.', null, enabled ? 'success' : 'warning');
       return c.json({ ok: true });
+    });
+
+    // ── Signatur fra Outlook ──
+    const canManageSig = (c: Context<Env>) => user(c).role === 'owner' || user(c).role === 'superadmin';
+    const sigView = async () => {
+      const s = await getSetting<SigSetting>('signature');
+      if (!s) return { status: 'none' as const };
+      if (!('html' in s)) return { status: 'not_found' as const, fetchedAt: s.fetchedAt };
+      return { status: s.active ? 'active' as const : 'inactive' as const, fetchedAt: s.fetchedAt, preview: previewHtml(s), images: s.images.length };
+    };
+    app.get('/api/mail/signature', async (c) => c.json(await sigView()));
+    app.post('/api/mail/signature/refresh', async (c) => {
+      if (!canManageSig(c)) return h.err(c, 403, 'Ingen tilgang.');
+      const conn = await getConn();
+      if (!conn || conn.status !== 'connected') return h.err(c, 409, 'E-post er ikke koblet til.');
+      try { await fetchSignature(); } catch (e) { return h.err(c, 502, `Kunne ikke hente signaturen: ${e instanceof Error ? e.message : String(e)}`); }
+      await h.audit(user(c), 'mail.signature_refreshed', '');
+      return c.json(await sigView());
+    });
+    app.post('/api/mail/signature', async (c) => {
+      if (!canManageSig(c)) return h.err(c, 403, 'Ingen tilgang.');
+      const s = await getSetting<SigSetting>('signature');
+      if (!s || !('html' in s)) return h.err(c, 409, 'Ingen signatur er hentet ennå.');
+      await setSetting('signature', { ...s, active: (await h.body(c)).active === true });
+      return c.json(await sigView());
     });
 
     app.post('/api/mail/sync-now', h.requireSuperadmin, async (c) => c.json((await syncOnce()) ?? { skipped: true }));
