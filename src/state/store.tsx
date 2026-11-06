@@ -8,6 +8,7 @@ import { mailProvider } from '../adapters/mail/SimulatedMailProvider';
 import { agentEngine, missingFor } from '../adapters/ai/SimulatedAgentEngine';
 import { id, sleep } from '../lib/util';
 import { api } from '../lib/api';
+import type { Quote, QuoteLine, CustomerKind } from '../lib/quote';
 
 /**
  * Lokal demotilstand. I produksjon erstattes denne av et API (database + bakgrunnsjobber),
@@ -25,6 +26,8 @@ export interface AppState {
   ignored: { message: EmailMessage; reason: string }[];
   /** All innkommende e-post (produksjon). I demo bygges listen fra meldingene. */
   inbox: InboxItem[];
+  /** Gjeldende tilbudsberegning per sak (produksjon). */
+  quotes: Quote[];
   busy: Partial<Record<AgentId, Busy>>;
   completed: Record<AgentId, number>;
   sending: Record<string, boolean>;
@@ -46,7 +49,7 @@ export interface MailStatus {
 }
 
 function initial(role: UserRole = 'owner'): AppState {
-  const base = { busy: {}, sending: {}, toasts: [], role, mail: null, loaded: DEMO, inbox: [] as InboxItem[] };
+  const base = { busy: {}, sending: {}, toasts: [], role, mail: null, loaded: DEMO, inbox: [] as InboxItem[], quotes: [] as Quote[] };
   if (DEMO) return { ...demoData.buildDemoState(), ...base, completed: { intake: 6, quote: 4, followup: 3, coordinator: 9, control: 5 } };
   return {
     ...base, cases: [], messages: [], drafts: [], activities: [], audit: [], ignored: [], techChat: {},
@@ -400,7 +403,7 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
     if (DEMO) return;
     try {
       const [s, mail] = await Promise.all([api<any>('/api/state'), api<MailStatus>('/api/mail/status')]);
-      update((st) => ({ ...st, cases: s.cases, messages: s.messages, drafts: s.drafts, activities: [...s.activities].reverse(), ignored: s.ignored, inbox: s.inbox ?? [], mail, loaded: true }));
+      update((st) => ({ ...st, cases: s.cases, messages: s.messages, drafts: s.drafts, activities: [...s.activities].reverse(), ignored: s.ignored, inbox: s.inbox ?? [], quotes: s.quotes ?? [], mail, loaded: true }));
     } catch { update((st) => ({ ...st, loaded: true })); }
   }, [update]);
 
@@ -475,6 +478,18 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
       update((s) => ({ ...s, cases: s.cases.filter((x) => x.id !== caseId) }));
       void call(`/api/cases/${caseId}`, undefined, `Kundedata for ${c.number} er slettet.`, 'DELETE');
     },
+    saveQuote: async (caseId: string, q: { lines: QuoteLine[]; markup: number; rounding: number; customerType: CustomerKind }) =>
+      call(`/api/cases/${caseId}/quote`, q, 'Beregningen er lagret.'),
+    suggestQuote: async (caseId: string): Promise<boolean> => {
+      try {
+        const r = await api<{ ok: boolean; reason?: string }>(`/api/cases/${caseId}/quote/suggest`, { body: {} });
+        toast(r.ok ? 'AIOliver har foreslått poster. Se over antall og priser.' : (r.reason ?? 'Fant ingen poster som passer.'), r.ok ? 'success' : 'neutral');
+        return r.ok;
+      } catch (e) { toast(e instanceof Error ? e.message : 'Kunne ikke lage forslag.', 'danger'); return false; }
+      finally { await refresh(); }
+    },
+    approveQuote: (caseId: string) => withAgent('quote', 'Skriver tilbudet …', caseId, () => call(`/api/cases/${caseId}/quote/approve`, {}, 'Tilbudet er klart. Les over og trykk Godkjenn og Send.')),
+    reopenQuote: (caseId: string) => call(`/api/cases/${caseId}/quote/reopen`, {}, 'Beregningen er åpnet for endring.'),
     notACase: async (caseId: string): Promise<boolean> => {
       const ok = await call(`/api/cases/${caseId}/not-a-case`, {}, 'Flyttet til «Sortert bort». Saken er fjernet.');
       return ok;
@@ -541,6 +556,10 @@ export function useStoreValue(tenant: TenantConfig, role: UserRole = 'owner') {
     actions: {
       ...jobs, approveAndSend, approveDraft, saveApproved, sendApproved, translateDraft, rejectDraft, regenerate, requestDraft, sendManual, moveCase, setPriority, markRead, resolveFlag, simulateInbound, simulateCustomerReply, exportCase, deleteCaseData, setRole, failNextSend, reset, toast,
       makeCase: async (_graphId: string): Promise<string | null> => { toast('Ikke tilgjengelig i demo.', 'neutral'); return null; },
+      saveQuote: async (_c: string, _q: { lines: QuoteLine[]; markup: number; rounding: number; customerType: CustomerKind }) => true,
+      suggestQuote: async (_c: string) => false,
+      approveQuote: async (_c: string) => {},
+      reopenQuote: async (_c: string) => true,
       notACase: async (caseId: string): Promise<boolean> => {
         const c = ref.current.cases.find((x) => x.id === caseId);
         if (!c) return false;

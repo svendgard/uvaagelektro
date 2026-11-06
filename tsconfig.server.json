@@ -19,6 +19,7 @@
   "server",
   "src/config",
   "src/lib/cleanMail.ts",
+  "src/lib/quote.ts",
   "src/domain",
   "src/demo.ts",
   "src/adapters/ai/SimulatedAgentEngine.ts",

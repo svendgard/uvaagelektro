@@ -257,6 +257,31 @@ CREATE TABLE IF NOT EXISTS tenant_settings (
 )
 `,
   },
+  {
+    // Tilbudsberegning per sak. Siste rad per sak er den gjeldende.
+    version: 7,
+    sql: `
+CREATE TABLE IF NOT EXISTS quotes (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL,
+  case_id uuid NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  lines jsonb NOT NULL DEFAULT '[]'::jsonb,
+  markup numeric NOT NULL DEFAULT 1,
+  warranty numeric NOT NULL DEFAULT 1,
+  vat_rate numeric NOT NULL DEFAULT 0.25,
+  rounding numeric NOT NULL DEFAULT 0,
+  customer_type text NOT NULL DEFAULT 'privat',
+  status text NOT NULL DEFAULT 'draft',
+  source text NOT NULL DEFAULT 'owner',
+  reason text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  approved_at timestamptz,
+  approved_by text
+);
+CREATE INDEX IF NOT EXISTS quotes_case ON quotes(case_id, created_at DESC)
+`,
+  },
 ];
 
 export async function migrate(db: Db): Promise<void> {

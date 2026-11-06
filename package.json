@@ -10,14 +10,14 @@
     "build:demo": "DEMO=true ARTIFACT=true vite build",
     "start": "tsx server/index.ts",
     "typecheck": "tsc && tsc -p tsconfig.server.json",
-    "test": "tsx tests/auth.mts && tsx tests/mfa.mts && tsx tests/health.mts && tsx tests/smoke.mts && tsx tests/projects.mts && tsx tests/mail.mts && tsx tests/ai.mts && tsx tests/clean.mts && tsx tests/signature.mts"
+    "test": "tsx tests/auth.mts && tsx tests/mfa.mts && tsx tests/health.mts && tsx tests/smoke.mts && tsx tests/projects.mts && tsx tests/mail.mts && tsx tests/ai.mts && tsx tests/clean.mts && tsx tests/signature.mts && tsx tests/quote.mts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@hono/node-server": "^1.13.7",
-    "hono": "^4.6.14",
+    "@hono/node-server": "^1.19.18",
+    "hono": "^4.13.16",
     "pg": "^8.13.1",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",

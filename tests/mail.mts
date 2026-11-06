@@ -60,6 +60,12 @@ const fakeFetch: typeof fetch = async (input: any, init: any = {}) => {
   if (url.includes('api.anthropic.com')) {
     const b = JSON.parse(init.body);
     const user: string = b.messages[0].content;
+    if (b.tools[0].name === 'foresla_tilbud') {
+      const priceable = user.includes('3 stikkontakter');
+      return json({ content: [{ type: 'tool_use', name: 'foresla_tilbud', input: priceable
+        ? { kan_prises: true, begrunnelse: 'Tydelig omfang.', linjer: [{ post_id: 'stikkontakt-2-uttak', antall: 3 }, { post_id: 'lyspunkt-downlights', antall: 2 }, { post_id: 'finnes-ikke', antall: 9 }], ukjente: [{ beskrivelse: 'Flytte stikkontakt', antall: 1 }] }
+        : { kan_prises: false, begrunnelse: 'Uklart omfang.', linjer: [], ukjente: [] } }] });
+    }
     if (b.tools[0].name === 'beskriv_stil') return json({ content: [{ type: 'tool_use', name: 'beskriv_stil', input: { stil: 'Kort og direkte. Åpner med «Hei <navn>,». Avslutter med «Mvh».' } }] });
     if (b.tools[0].name === 'oversatt') return json({ content: [{ type: 'tool_use', name: 'oversatt', input: { subject: 'RE: EV charger', body: 'Hi Test,\n\nThanks for your enquiry.' } }] });
     if (b.tools[0].name === 'registrer_vurdering') {
@@ -451,6 +457,60 @@ const moved = (await espen.req('GET', '/api/state')).json.cases.find((c: any) =>
 assert.equal(moved.nextAction, 'Flyttet hit av Espen. Trenger oppfølging.');
 ok('Automatiske svar og leveringsfeil gir ikke svarforslag; manuell flytting oppdaterer neste steg');
 
+// 10j. Tilbudsberegning: AI foreslår poster fra prislisten, eieren godkjenner, e-posten får eksakte linjer og sum.
+inbox.push(msg('q1', 'conv-q1', 'q@test.no', 'Q Kunde', 'Pris', 'Hei, ønsker 3 stikkontakter (2 uttak) og 2 downlights i stua.', '2026-10-23T12:10:00Z'));
+clock = Date.parse('2026-10-23T12:11:00Z');
+await mail.syncOnce();
+let stQ = (await espen.req('GET', '/api/state')).json;
+const qCaseId = stQ.inbox.find((x: any) => x.id === 'q1').caseId;
+assert.equal(stQ.cases.find((c: any) => c.id === qCaseId).status, 'ready_for_quote');
+assert.equal(stQ.drafts.filter((d: any) => d.caseId === qCaseId).length, 0, 'ingen e-post før beregningen er godkjent');
+let quote = stQ.quotes.find((q: any) => q.caseId === qCaseId);
+assert.deepEqual(quote.lines.map((l: any) => [l.name, l.qty, l.unitPrice, !!l.needsReview]), [['Stikkontakt - 2 uttak', 3, 800, false], ['Lyspunkt - Downlights', 2, 1100, false], ['Flytte stikkontakt', 1, 0, true]], 'ukjente poster fra AI ignoreres, ting utenfor prislisten krever vurdering');
+assert.equal(quote.status, 'draft'); assert.equal(quote.source, 'ai'); assert.equal(quote.warranty, 1.05);
+const blocked = await espen.req('POST', `/api/cases/${qCaseId}/quote/approve`);
+assert.equal(blocked.status, 400); assert.match(blocked.json.error, /Flytte stikkontakt/);
+assert.equal((await sa.req('POST', `/api/cases/${qCaseId}/quote`, { lines: [] })).status, 403);
+const lines2 = quote.lines.map((l: any) => l.name === 'Flytte stikkontakt' ? { ...l, unitPrice: 1200, needsReview: false } : l);
+assert.equal((await espen.req('POST', `/api/cases/${qCaseId}/quote`, { lines: lines2, customerType: 'privat', rounding: 0 })).status, 200);
+assert.equal((await espen.req('POST', `/api/cases/${qCaseId}/quote`, { lines: [{ name: 'X', qty: -1, unitPrice: 1 }] })).status, 400);
+const appr = await espen.req('POST', `/api/cases/${qCaseId}/quote/approve`);
+assert.equal(appr.status, 200);
+stQ = (await espen.req('GET', '/api/state')).json;
+const qDraft = stQ.drafts.find((d: any) => d.id === appr.json.draftId);
+assert.equal(qDraft.kind, 'quote');
+// (3×800 + 2×1100 + 1200) = 5800; × 1,05 × 1,25 = 7612,50 → 7 613 kr inkl. mva
+assert.match(qDraft.body, /• Stikkontakt - 2 uttak, 3 stk: 3 150 kr\n• Lyspunkt - Downlights, 2 stk: 2 888 kr\n• Flytte stikkontakt, 1 stk: 1 575 kr\n\nSum inkl\. mva: 7 613 kr/);
+const qPrompt = calls.filter((c) => c.url.includes('anthropic') && c.body!.includes('lag_utkast')).at(-1)!.body!;
+assert.ok(qPrompt.includes('[[PRISER]]') && qPrompt.includes('Skriv ALDRI beløp'), 'AI skriver ikke priser selv');
+assert.equal((await espen.req('POST', `/api/cases/${qCaseId}/quote`, { lines: lines2 })).status, 409, 'godkjent beregning kan ikke endres uten å åpnes');
+assert.equal((await espen.req('POST', `/api/cases/${qCaseId}/quote/reopen`)).status, 200);
+stQ = (await espen.req('GET', '/api/state')).json;
+assert.equal(stQ.drafts.find((d: any) => d.id === appr.json.draftId).state, 'superseded', 'gammelt tilbudsutkast lagt bort');
+assert.equal((await espen.req('POST', `/api/cases/${qCaseId}/quote`, { lines: lines2, customerType: 'naering' })).status, 200);
+const appr2 = await espen.req('POST', `/api/cases/${qCaseId}/quote/approve`);
+stQ = (await espen.req('GET', '/api/state')).json;
+assert.match(stQ.drafts.find((d: any) => d.id === appr2.json.draftId).body, /Sum eks\. mva: 6 090 kr/, 'bedrift: eks. mva');
+assert.equal((await espen.req('POST', `/api/drafts/${appr2.json.draftId}/approve`, {})).status, 200);
+assert.equal((await espen.req('POST', `/api/drafts/${appr2.json.draftId}/send`)).status, 200);
+stQ = (await espen.req('GET', '/api/state')).json;
+assert.equal(stQ.quotes.find((q: any) => q.caseId === qCaseId).status, 'sent');
+assert.equal(stQ.cases.find((c: any) => c.id === qCaseId).status, 'quote_sent', 'Tilbud sendt');
+ok('Tilbud: AI-forslag fra prislisten, vurdering kreves, godkjent beregning gir eksakte linjer og sum, sendt → Tilbud sendt');
+
+const pl0 = (await espen.req('GET', '/api/pricelist')).json;
+assert.equal(pl0.items.length, 39);
+const edited2 = pl0.items.map((i: any) => i.id === 'dimmer' ? { ...i, unitPrice: 1200 } : i);
+assert.equal((await espen.req('PUT', '/api/pricelist', { items: edited2, markup: 1, warranty: 1.05 })).status, 200);
+assert.equal((await espen.req('GET', '/api/pricelist')).json.items.find((i: any) => i.id === 'dimmer').unitPrice, 1200);
+assert.equal((await espen.req('PUT', '/api/pricelist', { items: [{ name: 'X', unitPrice: -5 }] })).status, 400);
+const { readFileSync } = await import('node:fs');
+const imp = await espen.req('POST', '/api/pricelist/import', { fileBase64: readFileSync(new URL('./fixtures/tilbudsberegning-mal.xlsx', import.meta.url)).toString('base64'), fileName: 'Tilbudsberegning - mal.xlsx' });
+assert.equal(imp.status, 200); assert.equal(imp.json.items.length, 39); assert.equal(imp.json.warranty, 1.05);
+assert.equal(imp.json.items.find((i: any) => i.name === 'Dimmer').unitPrice, 1000, 'Excel overskriver');
+assert.equal((await espen.req('POST', '/api/pricelist/import', { fileBase64: Buffer.from('ikke excel').toString('base64') })).status, 400);
+ok('Prisliste: 39 poster fra Excel, kan redigeres og lastes opp på nytt');
+
 // 11. Synkroniseringsrunder registreres for helserapportering
 const lastRun = await mail.latestDeliveredRun();
 assert.ok(lastRun && lastRun.scan_run_id.startsWith('mail-sync-') && lastRun.persisted_at);
@@ -464,5 +524,5 @@ assert.equal(st.status, 'reconnect_required'); assert.equal(st.connected, false)
 assert.equal(await mail.syncOnce(), null);
 ok('Utløpt Microsoft-tilkobling oppdages og vises. Synk stopper uten å krasje.');
 
-console.log(`\n${pass} av 25 tester bestått`);
+console.log(`\n${pass} av 27 tester bestått`);
 process.exit(0);
