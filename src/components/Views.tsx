@@ -27,8 +27,9 @@ function InboxMailDialog({ item, onClose, openCase }: { item: InboxItem | null; 
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmOut, setConfirmOut] = useState(false);
   useEffect(() => {
-    setData(null); setError(null);
+    setData(null); setError(null); setConfirmOut(false);
     if (!item || DEMO) return;
     let alive = true;
     api(`/api/inbox/${encodeURIComponent(item.id)}`).then((r) => { if (alive) setData(r); }).catch((e) => { if (alive) setError(e instanceof Error ? e.message : 'Kunne ikke hente e-posten.'); });
@@ -37,6 +38,10 @@ function InboxMailDialog({ item, onClose, openCase }: { item: InboxItem | null; 
   if (!item) return null;
   const meta = DECISION_META[item.decision];
   const canAct = state.role === 'owner';
+  // «Ikke en sak» bare når ingenting er sendt til kunden i saken (ellers: sett saken til Avsluttet).
+  const caseMsgs = item.caseId ? state.messages.filter((m) => m.threadId === item.caseId) : [];
+  const replied = caseMsgs.some((m) => m.direction === 'outbound') || state.drafts.some((d) => d.caseId === item.caseId && (d.state === 'sent' || d.state === 'sending'));
+  const inboundCount = caseMsgs.filter((m) => m.direction === 'inbound').length;
   return (
     <Modal open onClose={onClose} title={item.subject || '(uten emne)'} wide>
       <div className="flex flex-col gap-3 p-4 sm:p-5">
@@ -58,7 +63,19 @@ function InboxMailDialog({ item, onClose, openCase }: { item: InboxItem | null; 
                 {data.attachments?.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{data.attachments.map((a: any) => <AttachmentChip key={a.id} a={a} href={`/api/inbox/${encodeURIComponent(item.id)}/attachments/${encodeURIComponent(a.id)}`} />)}</div>}
               </>}
         </div>
+        {confirmOut && (
+          <div className="flex flex-col gap-2 rounded-xl border border-line bg-sunk px-4 py-3 text-[13px]">
+            <p><b>Ikke en sak?</b> Saken {item.caseNumber}{inboundCount > 1 ? ` med ${inboundCount} e-poster` : ''} og svarforslaget fjernes, og ingenting sendes. E-posten blir liggende under «Sortert bort» og kan gjøres om til sak igjen.</p>
+            <div className="flex flex-wrap gap-2">
+              <button className="btn btn-primary" disabled={busy} onClick={async () => { setBusy(true); const ok = await actions.notACase(item.caseId!); setBusy(false); if (ok) onClose(); }}>{busy ? 'Flytter …' : 'Ja, ikke en sak'}</button>
+              <button className="btn btn-ghost" disabled={busy} onClick={() => setConfirmOut(false)}>Avbryt</button>
+            </div>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
+          {item.caseId && canAct && !replied && !confirmOut && (
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setConfirmOut(true)}><Icon name="x" />Ikke en sak</button>
+          )}
           {item.caseId
             ? <button className="btn btn-primary" onClick={() => { onClose(); openCase(item.caseId!); }}><Icon name="arrow" />Åpne sak {item.caseNumber}</button>
             : <button className="btn btn-accent" disabled={busy || !canAct || DEMO} onClick={async () => { setBusy(true); const id = await actions.makeCase(item.id); setBusy(false); if (id) { onClose(); openCase(id); } }}>
@@ -66,6 +83,7 @@ function InboxMailDialog({ item, onClose, openCase }: { item: InboxItem | null; 
               </button>}
           <button className="btn btn-ghost" onClick={onClose}>Lukk</button>
         </div>
+        {item.caseId && canAct && replied && <p className="text-[11px] text-muted">Det er sendt svar i denne saken. Vil du lukke den, setter du saken til «Avsluttet» inne i saken.</p>}
         {!item.caseId && <p className="text-[11px] text-muted">Som sak får e-posten et svarforslag fra AIOliver, og den følges opp som andre saker. Ingenting sendes uten at du godkjenner.</p>}
       </div>
     </Modal>
