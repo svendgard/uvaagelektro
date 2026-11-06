@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import { AttachmentChip, MailBody } from './CaseDetail';
 import { MailConnectionCard, SignatureCard } from './MailConnection';
+import { PriceListCard } from './PriceListCard';
 import { previewText } from '../lib/cleanMail';
 import { useStore } from '../state/store';
 import { AUTOMATION_LEVELS } from '../config/tenant';
@@ -273,7 +274,7 @@ export function SettingsView({ isSuperadmin = false, canConnect = false }: { isS
         </div>
       </section>}
 
-      <section className="card p-5">
+      {!DEMO ? <PriceListCard canEdit={canConnect || isSuperadmin} /> : <section className="card p-5">
         <h2 className="mb-1 font-display text-base font-semibold">Prismaler</h2>
         <p className="mb-3 text-[13px] text-muted">AIOliver bruker bare priser herfra. Finnes ingen mal, må Espen sette pris selv.{DEMO && ' Tallene under er eksempler.'}</p>
         {tenant.priceTemplates.length === 0 && <p className="rounded-lg bg-sunk px-3 py-2 text-[13px] text-muted">Ingen prismaler lagt inn ennå. Til da lager AIOliver bare svar uten priser.</p>}
@@ -282,7 +283,7 @@ export function SettingsView({ isSuperadmin = false, canConnect = false }: { isS
             <li key={p.id} className="flex flex-wrap items-baseline justify-between gap-2 py-2"><span>{p.label}<span className="block text-xs text-faint">{p.note}</span></span><b className="tnum">{kr(p.amount)} <span className="font-normal text-muted">{p.unit}</span></b></li>
           ))}
         </ul>
-      </section>
+      </section>}
 
       {tenant.features.projects && <section className="card p-5">
         <h2 className="mb-1 font-display text-base font-semibold">Prosjektkontroll og fakturagrunnlag</h2>

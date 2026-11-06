@@ -7,8 +7,10 @@ import { decryptSecret, encryptSecret } from './auth/totp';
 import { newToken, sha256 } from './auth/crypto';
 import { Graph, GraphError, MsAuthError, addr, authorizeUrl, exchangeCode, idTokenClaims, pkce, refreshTokens, type Fetch, type GraphMessage, type MsConfig } from './microsoft';
 import { cleanMail } from '../src/lib/cleanMail';
+import { calcQuote, insertPrices, quoteText, type PriceList, type Quote, type QuoteLine } from '../src/lib/quote';
+import { parsePriceListXlsx } from './pricelistImport';
 import { cidsIn, extractSignature, findRepeatedSignature, previewHtml, stripClosing, type StoredSignature } from './signature';
-import { describeStyle, draftReply, translate, triage, LANGS, type AiConfig, type InMail, type Lang } from './ai';
+import { describeStyle, draftReply, suggestQuote, translate, triage, LANGS, type AiConfig, type InMail, type Lang } from './ai';
 
 /**
  * E-post for Agentkontoret: tilkobling til Microsoft 365, synkronisering, saker, utkast og sending.
@@ -161,6 +163,85 @@ export function createMail(d: MailDeps) {
       .map((m) => ({ direction: m.direction, from: `${m.from_addr.name} <${m.from_addr.email}>`, at: new Date(m.sent_at).toISOString(), subject: m.subject, body: cleanMail(m.body).text || m.body }));
   }
 
+  // ── Prisliste og tilbudsberegning ───────────────────────────────────────────
+  const getPriceList = async (): Promise<PriceList> =>
+    (await getSetting<PriceList>('price_list')) ?? tenant.priceList ?? { items: [], markup: 1, warranty: 1, vatRate: 0.25 };
+
+  const toQuote = (r: any): Quote => ({
+    id: r.id, caseId: r.case_id, lines: r.lines ?? [], markup: Number(r.markup), warranty: Number(r.warranty), vatRate: Number(r.vat_rate),
+    rounding: Number(r.rounding), customerType: r.customer_type === 'naering' ? 'naering' : 'privat', status: r.status, source: r.source,
+    reason: r.reason ?? undefined, createdAt: new Date(r.created_at).toISOString(), updatedAt: new Date(r.updated_at).toISOString(),
+    approvedAt: r.approved_at ? new Date(r.approved_at).toISOString() : undefined, approvedBy: r.approved_by ?? undefined,
+  });
+  const latestQuote = async (caseId: string): Promise<Quote | null> => {
+    const r = (await db.query<any>('SELECT * FROM quotes WHERE case_id = $1 AND tenant_id = $2 ORDER BY created_at DESC LIMIT 1', [caseId, tenantId])).rows[0];
+    return r ? toQuote(r) : null;
+  };
+
+  /** Validerer linjer fra appen: navn, antall, pris. Linjer utenfor prislisten krever vurdering til eieren har satt pris. */
+  function cleanLines(v: unknown, pl: PriceList): QuoteLine[] | null {
+    if (!Array.isArray(v) || v.length > 80) return null;
+    const byId = new Map(pl.items.map((i) => [i.id, i]));
+    const out: QuoteLine[] = [];
+    for (const raw of v) {
+      const l = raw as any;
+      const qty = Number(l?.qty), unitPrice = Number(l?.unitPrice);
+      if (!Number.isFinite(qty) || qty < 0 || qty > 100000 || !Number.isFinite(unitPrice) || unitPrice < 0 || unitPrice > 10_000_000) return null;
+      const item = l?.itemId ? byId.get(String(l.itemId)) : undefined;
+      const name = String(l?.name ?? item?.name ?? '').trim().slice(0, 160);
+      if (!name) return null;
+      out.push({ id: String(l?.id || randomUUID()).slice(0, 60), itemId: item?.id, name, qty, unitPrice, unit: String(l?.unit ?? item?.unit ?? 'stk').slice(0, 12),
+        needsReview: l?.needsReview === true && !(unitPrice > 0), note: l?.note ? String(l.note).slice(0, 200) : undefined });
+    }
+    return out;
+  }
+
+  /** Lagrer beregningen: oppdaterer gjeldende kladd, ellers ny rad (f.eks. etter at et tilbud er sendt). */
+  async function saveQuote(caseId: string, data: { lines: QuoteLine[]; markup: number; rounding: number; customerType: 'privat' | 'naering'; source: 'ai' | 'owner'; reason?: string }) {
+    const pl = await getPriceList();
+    const cur = await latestQuote(caseId);
+    const at = new Date(now());
+    if (cur && cur.status === 'draft') {
+      await db.query(`UPDATE quotes SET lines = $2, markup = $3, rounding = $4, customer_type = $5, source = $6, reason = $7, updated_at = $8 WHERE id = $1`,
+        [cur.id, JSON.stringify(data.lines), data.markup, data.rounding, data.customerType, data.source, data.reason ?? cur.reason ?? null, at]);
+      return cur.id;
+    }
+    const id = randomUUID();
+    await db.query(`INSERT INTO quotes(id, tenant_id, case_id, lines, markup, warranty, vat_rate, rounding, customer_type, status, source, reason, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'draft',$10,$11,$12,$12)`,
+      [id, tenantId, caseId, JSON.stringify(data.lines), data.markup, pl.warranty, pl.vatRate, data.rounding, data.customerType, data.source, data.reason ?? null, at]);
+    return id;
+  }
+
+  /**
+   * Ny e-post fra kunden: kan saken prises fra prislisten, lager AIOliver en tilbudsberegning som eieren ser over
+   * (ingen e-post før beregningen er godkjent). Ellers lages et vanlig svarforslag.
+   */
+  async function respondToCustomer(caseId: string) {
+    const pl = await getPriceList();
+    const q = await latestQuote(caseId);
+    if (d.ai.apiKey && pl.items.length && !(q && (q.status === 'approved' || q.status === 'sent'))) {
+      try {
+        const c = (await db.query<any>('SELECT * FROM cases WHERE id = $1', [caseId])).rows[0];
+        const sug = await suggestQuote(d.ai, tenant, { priceList: pl, summary: c.summary, thread: await threadFor(caseId) });
+        if (sug.priceable) {
+          const byId = new Map(pl.items.map((i) => [i.id, i]));
+          const lines: QuoteLine[] = [
+            ...sug.lines.map((l) => { const it = byId.get(l.itemId)!; return { id: randomUUID(), itemId: it.id, name: it.name, qty: l.qty, unitPrice: it.unitPrice, unit: it.unit, needsReview: !(it.unitPrice > 0), note: l.note }; }),
+            ...sug.unknown.map((u) => ({ id: randomUUID(), name: u.description, qty: u.qty, unitPrice: 0, unit: 'stk', needsReview: true, note: 'Finnes ikke i prislisten' })),
+          ];
+          await saveQuote(caseId, { lines, markup: pl.markup, rounding: 0, customerType: c.customer?.type === 'naering' ? 'naering' : 'privat', source: 'ai', reason: sug.reason });
+          await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND state IN ('pending','approved','send_failed') AND sending_at IS NULL`, [caseId]);
+          await db.query(`UPDATE cases SET status = 'ready_for_quote', assigned_agent = 'quote', next_action = 'Tilbudsberegning klar – se over og godkjenn.', updated_at = $2 WHERE id = $1`, [caseId, new Date(now())]);
+          const review = lines.filter((l) => l.needsReview).length;
+          await activity('quote', `AIOliver laget en tilbudsberegning (${lines.length} poster${review ? `, ${review} krever din vurdering` : ''}).`, caseId);
+          return;
+        }
+      } catch (e) { log('warn', 'Tilbudsforslag feilet, lager vanlig svar', { error: String(e) }); }
+    }
+    await createDraft(caseId, { fromCustomer: true });
+  }
+
   /**
    * Kopi som standard: alle som var med på e-posten det svares på (mottakere og kopi), unntatt oss selv og
    * kunden vi svarer til. Eieren kan fjerne eller legge til før sending.
@@ -181,7 +262,12 @@ export function createMail(d: MailDeps) {
     const kind = opts.kind ?? (missing.length ? 'info_request' : 'reply');
     const autoSignature = !!(await activeSignature());
     const styleSet = await getSetting<StyleSetting>('style');
-    const out = await draftReply(d.ai, tenant, { kind, customerName: c.customer.name, summary: c.summary, missing, urgent: c.priority === 'urgent', thread: await threadFor(caseId), feedback: opts.feedback, previous: opts.previous, autoSignature, style: styleSet ? { summary: styleSet.summary, examples: styleSet.examples } : undefined });
+    // Tilbud: bare fra en godkjent beregning. AI skriver teksten, systemet setter inn linjer og sum.
+    const approvedQuote = kind === 'quote' ? await latestQuote(caseId).then((q) => (q && q.status === 'approved' ? q : null)) : null;
+    const out = await draftReply(d.ai, tenant, { kind, customerName: c.customer.name, summary: c.summary, missing, urgent: c.priority === 'urgent', thread: await threadFor(caseId), feedback: opts.feedback, previous: opts.previous, autoSignature, style: styleSet ? { summary: styleSet.summary, examples: styleSet.examples } : undefined,
+      quoteItems: approvedQuote ? approvedQuote.lines.filter((l) => l.qty > 0).map((l) => l.name) : undefined });
+    if (approvedQuote) out.body = insertPrices(out.body, quoteText(approvedQuote));
+    else out.body = out.body.replace(/\[\[PRISER\]\]\n*/g, '');
     const prev = (await db.query<{ v: number }>('SELECT COALESCE(max(version),0)::int AS v FROM drafts WHERE case_id = $1', [caseId])).rows[0].v;
     await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND state IN ('pending','approved','send_failed')`, [caseId]);
     const lastIn = (await db.query<{ graph_id: string; from_addr: any; to_addrs: any[]; cc_addrs: any[] }>(`SELECT graph_id, from_addr, to_addrs, cc_addrs FROM mail_messages WHERE case_id = $1 AND direction = 'inbound' AND graph_id IS NOT NULL ORDER BY sent_at DESC LIMIT 1`, [caseId])).rows[0];
@@ -265,7 +351,7 @@ export function createMail(d: MailDeps) {
       ? `${tenant.owner.firstName} gjorde e-posten fra ${t.customer.name} om til en sak.`
       : `AIEmma registrerte ny henvendelse fra ${t.customer.name}${t.engine === 'regler' ? ' (enkle regler)' : ''}.`, id);
     if (flagged) await activity('coordinator', `AIHenrik: ${flagged.reason}`, id, 'danger');
-    await createDraft(id, { fromCustomer: true });
+    await respondToCustomer(id);
     return id;
   }
 
@@ -346,7 +432,7 @@ export function createMail(d: MailDeps) {
           await activity(automatic ? 'system' : 'customer', automatic
             ? `Automatisk svar mottatt i saken (${from.name || from.email}): «${(m.subject ?? '').slice(0, 80)}».`
             : `${from.name || from.email} skrev i saken${ownerOnCc ? ` (du står på kopi${needsOwner ? '' : ', ingen svar trengs fra deg'})` : ''}.`, existing.id, automatic ? 'warning' : undefined);
-          if (needsOwner && !['won', 'lost'].includes(existing.status)) await createDraft(existing.id, { fromCustomer: true });
+          if (needsOwner && !['won', 'lost'].includes(existing.status)) await respondToCustomer(existing.id);
         } else if (from.email === mailbox) {
           await logItem(m, 'self', 'Sendt fra deg selv');
         } else if (ownDomain && from.email.endsWith(`@${ownDomain}`)) {
@@ -501,6 +587,7 @@ export function createMail(d: MailDeps) {
       [randomUUID(), tenantId, c.id, c.conversation_id, JSON.stringify({ name: tenant.owner.name, email: conn.mailbox }), JSON.stringify([{ name: c.customer.name, email: to }]),
         JSON.stringify(cc.map((email) => ({ name: email, email }))), claimed.subject, text, at, claimed.author, claimed.decided_by ?? who.email]);
     // «Under arbeid» settes og fjernes bare av eieren; sending av vanlige svar flytter ikke saken ut derfra.
+    if (claimed.kind === 'quote') await db.query(`UPDATE quotes SET status = 'sent', updated_at = $2 WHERE case_id = $1 AND status = 'approved'`, [c.id, at]);
     const nextStatus = claimed.kind === 'quote' ? 'quote_sent' : c.status === 'in_progress' ? 'in_progress' : 'awaiting_customer';
     await db.query(`UPDATE cases SET status = $2, assigned_agent = 'followup', next_action = $4, updated_at = $3 WHERE id = $1`,
       [c.id, nextStatus, at, nextStatus === 'in_progress' ? 'Under arbeid.' : 'Venter på svar fra kunden.']);
@@ -541,6 +628,7 @@ export function createMail(d: MailDeps) {
     const drafts = ids.length ? (await db.query<any>('SELECT * FROM drafts WHERE case_id = ANY($1::uuid[]) ORDER BY created_at', [ids])).rows : [];
     const acts = (await db.query<any>('SELECT * FROM activities WHERE tenant_id = $1 ORDER BY at DESC LIMIT 400', [tenantId])).rows;
     const ignored = (await db.query<any>(`SELECT graph_id, reason, sender_domain, at FROM triage_log WHERE tenant_id = $1 AND decision = 'ignored' ORDER BY at DESC LIMIT 30`, [tenantId])).rows;
+    const quoteRows = ids.length ? (await db.query<any>(`SELECT DISTINCT ON (case_id) * FROM quotes WHERE case_id = ANY($1::uuid[]) ORDER BY case_id, created_at DESC`, [ids])).rows : [];
     const inbox = (await db.query<any>(`SELECT t.*, c.number AS case_number FROM triage_log t LEFT JOIN cases c ON c.id = t.case_id
       WHERE t.tenant_id = $1 ORDER BY COALESCE(t.received_at, t.at) DESC LIMIT 300`, [tenantId])).rows;
     const iso = (v: any) => new Date(v).toISOString();
@@ -565,6 +653,7 @@ export function createMail(d: MailDeps) {
         error: x.error ?? undefined, rewritten: !!x.rewritten, feedback: x.feedback ?? undefined, cc: x.cc ?? [],
       })),
       activities: acts.slice(0, 120).map((a) => ({ id: String(a.id), at: iso(a.at), actor: a.actor, caseId: a.case_id ?? undefined, text: a.text, tone: a.tone ?? undefined })),
+      quotes: quoteRows.map(toQuote),
       inbox: inbox.map((i) => ({
         id: i.graph_id, decision: i.decision, reason: i.reason ?? '', caseId: i.case_id && i.case_number ? i.case_id : undefined, caseNumber: i.case_number ?? undefined,
         from: { name: i.from_name || i.from_email || i.sender_domain || 'Ukjent avsender', email: i.from_email || '' },
@@ -681,7 +770,7 @@ export function createMail(d: MailDeps) {
           await insertMessage(existing.id, m, 'inbound', atts);
           await logItem(m, 'case', '', existing.id);
           await activity('owner', `${tenant.owner.firstName} la e-posten «${(m.subject ?? '').slice(0, 80)}» til saken.`, existing.id);
-          await createDraft(existing.id, { fromCustomer: true });
+          await respondToCustomer(existing.id);
           return c.json({ ok: true, caseId: existing.id });
         }
         const from = addr(m.from);
@@ -827,7 +916,7 @@ export function createMail(d: MailDeps) {
     const rewrite = async (c: Context<Env>) => {
       if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan be om nye utkast.');
       const fb = String((await h.body(c)).feedback ?? '');
-      return reply(c, await rewriteDraft(c.req.param('id'), fb || undefined));
+      return reply(c, await rewriteDraft(c.req.param('id') ?? '', fb || undefined));
     };
     app.post('/api/drafts/:id/rewrite', rewrite);
     app.post('/api/drafts/:id/regenerate', rewrite);
@@ -915,6 +1004,130 @@ export function createMail(d: MailDeps) {
       await db.query('DELETE FROM cases WHERE id = $1', [kase.id]);
       await activity('owner', `${tenant.owner.firstName} flyttet en e-post ut av sakene (ikke en sak).`, null);
       await h.audit(user(c), 'case.not_a_case', kase.number);
+      return c.json({ ok: true });
+    });
+
+    // ── Prisliste ──
+    app.use('/api/pricelist', h.requireUser);
+    app.use('/api/pricelist/*', h.requireUser);
+    const canEditPrices = (c: Context<Env>) => user(c).role === 'owner' || user(c).role === 'superadmin';
+    app.get('/api/pricelist', async (c) => c.json(await getPriceList()));
+    app.put('/api/pricelist', async (c) => {
+      if (!canEditPrices(c)) return h.err(c, 403, 'Ingen tilgang.');
+      const b = await h.body(c);
+      const items = Array.isArray(b.items) ? b.items : null;
+      if (!items || items.length > 500) return h.err(c, 400, 'Ugyldig prisliste.');
+      const clean = [];
+      const seen = new Set<string>();
+      for (const it of items as any[]) {
+        const name = String(it?.name ?? '').trim().slice(0, 160);
+        const price = Number(it?.unitPrice);
+        if (!name || !Number.isFinite(price) || price < 0 || price > 10_000_000) return h.err(c, 400, `Ugyldig post: ${name || '(uten navn)'}`);
+        let id = String(it?.id || name.toLowerCase().replace(/[^a-z0-9æøå]+/g, '-')).slice(0, 60);
+        while (seen.has(id)) id = `${id}-x`;
+        seen.add(id);
+        clean.push({ id, group: String(it?.group ?? 'Annet').slice(0, 80), name, unitPrice: Math.round(price), unit: String(it?.unit ?? 'stk').slice(0, 12) });
+      }
+      const cur = await getPriceList();
+      const markup = Number(b.markup ?? cur.markup), warranty = Number(b.warranty ?? cur.warranty);
+      if (!(markup > 0 && markup < 5) || !(warranty >= 1 && warranty < 2)) return h.err(c, 400, 'Påslag eller garanti er ugyldig.');
+      const value: PriceList = { items: clean, markup, warranty, vatRate: cur.vatRate ?? 0.25, updatedAt: new Date(now()).toISOString(), source: 'Redigert i Agentkontoret' };
+      await setSetting('price_list', value);
+      await h.audit(user(c), 'pricelist.updated', `${clean.length} poster`);
+      return c.json(value);
+    });
+    app.post('/api/pricelist/import', async (c) => {
+      if (!canEditPrices(c)) return h.err(c, 403, 'Ingen tilgang.');
+      const b = await h.body(c);
+      const b64 = String(b.fileBase64 ?? '');
+      if (!b64 || b64.length > 4_000_000) return h.err(c, 400, 'Filen mangler eller er for stor (maks 3 MB).');
+      try {
+        const parsed = await parsePriceListXlsx(Buffer.from(b64, 'base64'));
+        const value: PriceList = { ...parsed, updatedAt: new Date(now()).toISOString(), source: String(b.fileName ?? 'Excel').slice(0, 120) };
+        await setSetting('price_list', value);
+        await h.audit(user(c), 'pricelist.imported', `${value.items.length} poster fra ${value.source}`);
+        return c.json(value);
+      } catch (e) { return h.err(c, 400, `Kunne ikke lese Excel-filen: ${e instanceof Error ? e.message : String(e)}`); }
+    });
+
+    // ── Tilbudsberegning per sak ──
+    app.post('/api/cases/:id/quote', async (c) => {
+      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan endre tilbud.');
+      const kase = await caseOf(c.req.param('id'));
+      if (!kase) return h.err(c, 404, 'Fant ikke saken.');
+      const cur = await latestQuote(kase.id);
+      if (cur?.status === 'approved') return h.err(c, 409, 'Beregningen er godkjent. Trykk «Endre beregning» først.');
+      const b = await h.body(c);
+      const pl = await getPriceList();
+      const lines = cleanLines(b.lines ?? cur?.lines ?? [], pl);
+      if (!lines) return h.err(c, 400, 'Ugyldige linjer.');
+      const markup = Number(b.markup ?? cur?.markup ?? pl.markup), rounding = Number(b.rounding ?? cur?.rounding ?? 0);
+      if (!(markup > 0 && markup < 5) || !Number.isFinite(rounding) || Math.abs(rounding) > 1_000_000) return h.err(c, 400, 'Ugyldig påslag eller avrunding.');
+      const customerType = b.customerType === 'naering' || b.customerType === 'privat' ? b.customerType : cur?.customerType ?? (kase.customer?.type === 'naering' ? 'naering' : 'privat');
+      await saveQuote(kase.id, { lines, markup, rounding, customerType, source: cur?.status === 'draft' ? cur.source : 'owner' });
+      if (!cur) {
+        await db.query(`UPDATE cases SET status = CASE WHEN status IN ('new','ai_processing','awaiting_approval','follow_up') THEN 'ready_for_quote' ELSE status END, next_action = 'Tilbudsberegning under arbeid.', updated_at = $2 WHERE id = $1`, [kase.id, new Date(now())]);
+        await activity('owner', `${tenant.owner.firstName} startet en tilbudsberegning.`, kase.id);
+      }
+      return c.json({ ok: true, quote: await latestQuote(kase.id) });
+    });
+
+    app.post('/api/cases/:id/quote/suggest', async (c) => {
+      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan be om forslag.');
+      const kase = await caseOf(c.req.param('id'));
+      if (!kase) return h.err(c, 404, 'Fant ikke saken.');
+      const cur = await latestQuote(kase.id);
+      if (cur?.status === 'approved') return h.err(c, 409, 'Beregningen er godkjent. Trykk «Endre beregning» først.');
+      const pl = await getPriceList();
+      try {
+        const sug = await suggestQuote(d.ai, tenant, { priceList: pl, summary: kase.summary, thread: await threadFor(kase.id) });
+        const byId = new Map(pl.items.map((i) => [i.id, i]));
+        const lines: QuoteLine[] = [
+          ...sug.lines.map((l) => { const it = byId.get(l.itemId)!; return { id: randomUUID(), itemId: it.id, name: it.name, qty: l.qty, unitPrice: it.unitPrice, unit: it.unit, needsReview: !(it.unitPrice > 0), note: l.note }; }),
+          ...sug.unknown.map((u) => ({ id: randomUUID(), name: u.description, qty: u.qty, unitPrice: 0, unit: 'stk', needsReview: true, note: 'Finnes ikke i prislisten' })),
+        ];
+        if (!lines.length) return c.json({ ok: false, reason: sug.reason || 'Fant ingen poster som passer. Legg dem inn selv.' });
+        await saveQuote(kase.id, { lines, markup: cur?.markup ?? pl.markup, rounding: cur?.rounding ?? 0, customerType: cur?.customerType ?? (kase.customer?.type === 'naering' ? 'naering' : 'privat'), source: 'ai', reason: sug.reason });
+        await activity('quote', `AIOliver foreslo ${lines.length} poster til tilbudsberegningen.`, kase.id);
+        return c.json({ ok: true, quote: await latestQuote(kase.id), reason: sug.reason });
+      } catch (e) { return h.err(c, 502, `Kunne ikke lage forslag: ${e instanceof Error ? e.message : String(e)}`); }
+    });
+
+    // Godkjenn beregningen: AIOliver lager tilbuds-e-posten med eksakte linjer og sum. Sendes først etter «Godkjenn» og «Send».
+    app.post('/api/cases/:id/quote/approve', async (c) => {
+      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan godkjenne tilbud.');
+      const kase = await caseOf(c.req.param('id'));
+      if (!kase) return h.err(c, 404, 'Fant ikke saken.');
+      const cur = await latestQuote(kase.id);
+      if (!cur || cur.status !== 'draft') return h.err(c, 409, 'Det finnes ingen beregning å godkjenne.');
+      const calc = calcQuote(cur);
+      if (!calc.shown.length) return h.err(c, 400, 'Beregningen har ingen poster.');
+      if (calc.blocking.length) return h.err(c, 400, `Disse postene trenger pris eller vurdering først: ${calc.blocking.map((l) => l.name).join(', ')}`);
+      const r = await db.query(`UPDATE quotes SET status = 'approved', approved_at = $2, approved_by = $3, updated_at = $2 WHERE id = $1 AND status = 'draft' RETURNING 1`, [cur.id, new Date(now()), user(c).email]);
+      if (!r.rows.length) return h.err(c, 409, 'Beregningen er allerede godkjent.');
+      await activity('owner', `${tenant.owner.firstName} godkjente tilbudsberegningen (${calc.includesVat ? 'inkl.' : 'eks.'} mva ${Math.round(calc.shownTotal).toLocaleString('nb-NO')} kr).`, kase.id, 'success');
+      try {
+        const id = await createDraft(kase.id, { kind: 'quote' });
+        return c.json({ ok: true, draftId: id });
+      } catch (e) {
+        await db.query(`UPDATE quotes SET status = 'draft', approved_at = NULL, approved_by = NULL WHERE id = $1`, [cur.id]);
+        return h.err(c, 502, `Kunne ikke lage tilbudsteksten: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
+
+    // Endre en godkjent (ikke sendt) beregning: åpnes igjen, og tilbudsutkastet legges bort.
+    app.post('/api/cases/:id/quote/reopen', async (c) => {
+      if (ownerOnly(c)) return h.err(c, 403, 'Bare eieren kan endre tilbud.');
+      const kase = await caseOf(c.req.param('id'));
+      if (!kase) return h.err(c, 404, 'Fant ikke saken.');
+      const cur = await latestQuote(kase.id);
+      if (!cur || cur.status !== 'approved') return h.err(c, 409, 'Beregningen kan ikke endres (ikke godkjent, eller allerede sendt).');
+      const sending = (await db.query(`SELECT 1 FROM drafts WHERE case_id = $1 AND kind = 'quote' AND (state = 'sending' OR sending_at IS NOT NULL)`, [kase.id])).rows.length;
+      if (sending) return h.err(c, 409, 'Tilbudet sendes nå.');
+      await db.query(`UPDATE drafts SET state = 'superseded' WHERE case_id = $1 AND kind = 'quote' AND state IN ('pending','approved','send_failed')`, [kase.id]);
+      await db.query(`UPDATE quotes SET status = 'draft', approved_at = NULL, approved_by = NULL, updated_at = $2 WHERE id = $1`, [cur.id, new Date(now())]);
+      await db.query(`UPDATE cases SET status = 'ready_for_quote', next_action = 'Tilbudsberegning under arbeid.', updated_at = $2 WHERE id = $1`, [kase.id, new Date(now())]);
+      await activity('owner', `${tenant.owner.firstName} åpnet tilbudsberegningen for endring. Tilbudsutkastet er lagt bort.`, kase.id);
       return c.json({ ok: true });
     });
 

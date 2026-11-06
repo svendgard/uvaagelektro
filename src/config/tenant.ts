@@ -1,4 +1,6 @@
 import { DEMO } from '../demo';
+import type { PriceList } from '../lib/quote';
+import { PRICE_LIST_UVAAG } from './priceList.uvaag';
 import type { AgentConfig, AutomationLevel, CaseStatus, DocKey, JobStage, JobType, Priority, Technician } from '../domain/types';
 
 /**
@@ -25,6 +27,8 @@ export interface TenantConfig {
   };
   /** Retningslinjer for tone og innhold i e-poster agentene skriver. Redigerbar per kunde. */
   writingBrief?: string;
+  /** Prisliste for tilbudsberegning (kan overstyres under Innstillinger). Uten prisliste lages ingen beregning. */
+  priceList?: PriceList;
   /** Godkjente prismaler. AIOliver kan bare bruke tall herfra. Eksempeltall, må erstattes av Espens egne. */
   priceTemplates: { id: string; jobType: JobType; label: string; amount: number; unit: string; note: string }[];
   rules: {
@@ -179,6 +183,7 @@ const uvaagElektroBase: TenantConfig = {
     sendingOnConnect: true,
   },
   writingBrief: CONTACT_BRIEF_UVAAG,
+  priceList: PRICE_LIST_UVAAG,
   priceTemplates: [],
   rules: {
     responseTargetHours: 24,
