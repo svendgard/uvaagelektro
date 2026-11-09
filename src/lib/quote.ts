@@ -87,7 +87,7 @@ const qtyText = (qty: number, unit: string) => {
 export function quoteText(q: Parameters<typeof calcQuote>[0]): string {
   const c = calcQuote(q);
   const rows = c.shown.map((l) => `• ${l.name}${l.unit ? `, ${qtyText(l.qty, l.unit)}` : ''}: ${kr(l.amount)}`);
-  return `${rows.join('\n')}\n\nSum ${c.includesVat ? 'inkl.' : 'eks.'} mva: ${kr(c.shownTotal)}`;
+  return `${rows.join('\n')}\n\n**Sum ${c.includesVat ? 'inkl.' : 'eks.'} mva: ${kr(c.shownTotal)}**`;
 }
 
 /** Setter prisblokken inn der AI har skrevet [[PRISER]], ellers før siste avsnitt. */
