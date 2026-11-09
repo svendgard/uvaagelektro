@@ -43,8 +43,8 @@ ok('Poster uten pris eller utenfor prislisten krever eierens vurdering');
 // 5. Prisblokk i e-posten
 const text = quoteText({ ...base, lines, customerType: 'privat' });
 assert.match(text, /^• Stikkontakt - 2 uttak, 3 stk: 3 150 kr\n/);
-assert.match(text, /Sum inkl\. mva: 13 125 kr$/);
-assert.match(quoteText({ ...base, lines, customerType: 'naering' }), /Sum eks\. mva: 10 500 kr$/);
+assert.match(text, /\*\*Sum inkl\. mva: 13 125 kr\*\*$/);
+assert.match(quoteText({ ...base, lines, customerType: 'naering' }), /\*\*Sum eks\. mva: 10 500 kr\*\*$/);
 assert.equal(insertPrices('Hei,\n\nHer er prisen:\n\n[[PRISER]]\n\nSi fra.', 'X'), 'Hei,\n\nHer er prisen:\n\nX\n\nSi fra.');
 assert.equal(insertPrices('Hei,\n\nHer er prisen.\n\nSi fra.', 'X'), 'Hei,\n\nHer er prisen.\n\nX\n\nSi fra.');
 ok('Prisblokken: linjer og sum, inkl. mva for privat og eks. mva for bedrift, satt inn i teksten');

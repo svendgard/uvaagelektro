@@ -480,7 +480,7 @@ stQ = (await espen.req('GET', '/api/state')).json;
 const qDraft = stQ.drafts.find((d: any) => d.id === appr.json.draftId);
 assert.equal(qDraft.kind, 'quote');
 // (3×800 + 2×1100 + 1200) = 5800; × 1,05 × 1,25 = 7612,50 → 7 613 kr inkl. mva
-assert.match(qDraft.body, /• Stikkontakt - 2 uttak, 3 stk: 3 150 kr\n• Lyspunkt - Downlights, 2 stk: 2 888 kr\n• Flytte stikkontakt, 1 stk: 1 575 kr\n\nSum inkl\. mva: 7 613 kr/);
+assert.match(qDraft.body, /• Stikkontakt - 2 uttak, 3 stk: 3 150 kr\n• Lyspunkt - Downlights, 2 stk: 2 888 kr\n• Flytte stikkontakt, 1 stk: 1 575 kr\n\n\*\*Sum inkl\. mva: 7 613 kr\*\*/);
 const qPrompt = calls.filter((c) => c.url.includes('anthropic') && c.body!.includes('lag_utkast')).at(-1)!.body!;
 assert.ok(qPrompt.includes('[[PRISER]]') && qPrompt.includes('Skriv ALDRI beløp'), 'AI skriver ikke priser selv');
 assert.equal((await espen.req('POST', `/api/cases/${qCaseId}/quote`, { lines: lines2 })).status, 409, 'godkjent beregning kan ikke endres uten å åpnes');
@@ -490,11 +490,13 @@ assert.equal(stQ.drafts.find((d: any) => d.id === appr.json.draftId).state, 'sup
 assert.equal((await espen.req('POST', `/api/cases/${qCaseId}/quote`, { lines: lines2, customerType: 'naering' })).status, 200);
 const appr2 = await espen.req('POST', `/api/cases/${qCaseId}/quote/approve`);
 stQ = (await espen.req('GET', '/api/state')).json;
-assert.match(stQ.drafts.find((d: any) => d.id === appr2.json.draftId).body, /Sum eks\. mva: 6 090 kr/, 'bedrift: eks. mva');
+assert.match(stQ.drafts.find((d: any) => d.id === appr2.json.draftId).body, /\*\*Sum eks\. mva: 6 090 kr\*\*/, 'bedrift: eks. mva');
 assert.equal((await espen.req('POST', `/api/drafts/${appr2.json.draftId}/approve`, {})).status, 200);
 assert.equal((await espen.req('POST', `/api/drafts/${appr2.json.draftId}/send`)).status, 200);
 stQ = (await espen.req('GET', '/api/state')).json;
 assert.equal(stQ.quotes.find((q: any) => q.caseId === qCaseId).status, 'sent');
+const qPatch = calls.filter((c) => c.method === 'PATCH' && c.body!.includes('Sum eks')).at(-1)!;
+assert.match(JSON.parse(qPatch.body!).body.content, /<b>Sum eks\. mva: 6 090 kr<\/b>/, 'summen er fet i Outlook');
 assert.equal(stQ.cases.find((c: any) => c.id === qCaseId).status, 'quote_sent', 'Tilbud sendt');
 ok('Tilbud: AI-forslag fra prislisten, vurdering kreves, godkjent beregning gir eksakte linjer og sum, sendt → Tilbud sendt');
 

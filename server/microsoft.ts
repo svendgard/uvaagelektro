@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { formatLine, segsToHtml } from '../src/lib/format';
 
 /**
  * Microsoft 365: innlogging (OAuth 2.0 med PKCE, delegert tilgang) og Microsoft Graph.
@@ -256,9 +257,9 @@ export function composeHtml(text: string, signatureHtml?: string): string {
 }
 
 export function textToHtml(text: string): string {
-  const linkify = (t: string) => esc(t).replace(/\bhttps?:\/\/[^\s<>"]+[^\s<>".,;:!?)]/g, (u) => `<a href="${u}">${u}</a>`);
+  // Avsnitt, linjeskift, klikkbare lenker og **fet**, _kursiv_, __understreket__. All tekst escapes.
   const paras = text.replace(/\r\n?/g, '\n').trim().split(/\n{2,}/)
-    .map((p) => `<p style="margin:0 0 11pt 0">${p.split('\n').map(linkify).join('<br>')}</p>`).join('');
+    .map((p) => `<p style="margin:0 0 11pt 0">${p.split('\n').map((l) => segsToHtml(formatLine(l))).join('<br>')}</p>`).join('');
   return `<div style="${FONT}">${paras}</div><br>`;
 }
 

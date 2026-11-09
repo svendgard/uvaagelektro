@@ -11,9 +11,11 @@ import { cx, fmtDateTime, kr } from '../lib/util';
 import { cleanMail, linkify } from '../lib/cleanMail';
 import { api } from '../lib/api';
 import { QuotePanel, QuoteStartButton } from './QuotePanel';
+import { FormattedEditor, FormattedText } from './Formatting';
+import { stripFormatting } from '../lib/format';
 
 /** Ren e-posttekst: bannere, plassholdere og sitert historikk ryddes bort. Lenker vises kort og klikkbart. */
-export function MailBody({ body }: { body: string }) {
+export function MailBody({ body, formatted = false }: { body: string; formatted?: boolean }) {
   const { text, quoted } = useMemo(() => cleanMail(body), [body]);
   const [showQuoted, setShowQuoted] = useState(false);
   const render = (t: string) => linkify(t).map((p, i) => 'href' in p
@@ -21,7 +23,7 @@ export function MailBody({ body }: { body: string }) {
     : <span key={i}>{p.t}</span>);
   return (
     <div className="text-[13px] leading-relaxed">
-      <div className="whitespace-pre-wrap">{text ? render(text) : <span className="text-faint">(Ingen tekst)</span>}</div>
+      {formatted && text ? <FormattedText text={text} /> : <div className="whitespace-pre-wrap">{text ? render(text) : <span className="text-faint">(Ingen tekst)</span>}</div>}
       {quoted && (
         <div className="mt-2">
           <button type="button" onClick={() => setShowQuoted((v) => !v)} className="rounded-full bg-sunk px-2 py-0.5 text-[11px] font-semibold text-muted hover:text-ink">
@@ -66,7 +68,7 @@ function Message({ m }: { m: EmailMessage }) {
           <time className="text-faint" dateTime={m.sentAt}>{fmtDateTime(m.sentAt)}</time>
         </header>
         <p className="break-anywhere mb-1 text-xs text-muted">Til: {m.to.map((t) => t.email).join(', ')}{m.cc && m.cc.length > 0 && <> · Kopi: {m.cc.map((t) => t.email).join(', ')}</>} · <span className="font-semibold text-ink">{m.subject}</span></p>
-        <MailBody body={m.body} />
+        <MailBody body={m.body} formatted={out && !!m.draftedBy} />
         {m.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{m.attachments.map((a) => <AttachmentChip key={a.id} a={a} messageId={m.id} />)}</div>}
       </div>
       {out && (
@@ -192,7 +194,7 @@ function ApprovalPanel({ d }: { d: Draft }) {
     const r = await actions.translateDraft(d.id, lang, form.subject, form.body);
     if (r) set({ subject: r.subject, body: r.body, language: lang });
   });
-  const mailto = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(form.subject)}&body=${encodeURIComponent(form.body)}`;
+  const mailto = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(form.subject)}&body=${encodeURIComponent(stripFormatting(form.body))}`;
 
   return (
     <section className={cx('rounded-xl border-2 p-4', d.error ? 'border-bad/60 bg-bad-soft/40' : inQueue ? 'border-ok/50 bg-ok-soft/40' : 'border-dashed border-accent/50 bg-accent-soft/40')} aria-label={inQueue ? 'Klar for sending' : 'Utkast til godkjenning'}>
@@ -256,7 +258,7 @@ function ApprovalPanel({ d }: { d: Draft }) {
             </div>
           )}
         </div>
-        <textarea id={`body-${d.id}`} className="field min-h-[200px] font-sans leading-relaxed" value={form.body} onChange={(e) => set({ body: e.target.value })} disabled={sending || !canAct} />
+        <FormattedEditor id={`body-${d.id}`} value={form.body} onChange={(body) => set({ body })} disabled={sending || !canAct} />
         {!DEMO && state.mail?.signature_active && <SignatureNote />}
         {dirty && !sending && (
           <p className="flex flex-wrap items-center gap-2 text-xs font-semibold text-accent-ink">
@@ -299,7 +301,7 @@ function ApprovalPanel({ d }: { d: Draft }) {
           {dirty && !sending && <button className="btn btn-ghost" disabled={!!busy || !canAct} onClick={() => void save()}>{busy === 'save' ? 'Lagrer …' : 'Lagre endringer'}</button>}
           {!sending && <>
             <a className="btn btn-ghost" href={mailto}><Icon name="mail" />Åpne i e-post</a>
-            <CopyButton text={form.body} subtle={!shadow} />
+            <CopyButton text={stripFormatting(form.body)} subtle={!shadow} />
             <button className="btn btn-ghost" disabled={!!busy || !canAct} onClick={() => { setMode('regen'); setNote(''); }}><Icon name="refresh" />Skriv på nytt</button>
             <button className="btn btn-danger" disabled={!!busy || !canAct} onClick={() => { setMode('reject'); setNote(''); }}><Icon name="x" />Avvis</button>
           </>}
@@ -329,9 +331,9 @@ function Composer({ caseId, onDone }: { caseId: string; onDone: () => void }) {
       <label className="sr-only" htmlFor={`ms-${caseId}`}>Emne</label>
       <input id={`ms-${caseId}`} className="field" value={subject} onChange={(e) => setSubject(e.target.value)} />
       <label className="sr-only" htmlFor={`mb-${caseId}`}>Melding</label>
-      <textarea id={`mb-${caseId}`} className="field min-h-[160px]" value={body} onChange={(e) => setBody(e.target.value)} />
+      <FormattedEditor id={`mb-${caseId}`} value={body} onChange={setBody} minHeight="min-h-[160px]" />
       <div className="flex flex-wrap items-center gap-2">
-        {shadow ? <CopyButton text={body} /> : (
+        {shadow ? <CopyButton text={stripFormatting(body)} /> : (
           <button className="btn btn-primary" disabled={busy || state.role !== 'owner' || !body.trim()} onClick={async () => { setBusy(true); await actions.sendManual(caseId, subject, body); setBusy(false); onDone(); }}>
             <Icon name="send" />{busy ? 'Sender …' : `Send til ${c.customer.email}`}
           </button>
